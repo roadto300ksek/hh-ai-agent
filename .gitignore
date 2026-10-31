@@ -1,0 +1,15 @@
+# Секретные данные
+hh_state.json
+.env
+
+# Результаты работы скриптов и отладка
+vacancies.json
+analyzed_vacancies.json
+cover_letters.json
+sent_log.json
+manual_queue.json
+executor_screenshots
+debug_page.html
+debug_screenshot.png
+__pycache__
+.pyc
