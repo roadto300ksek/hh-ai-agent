@@ -2,11 +2,11 @@ import json
 import time
 import os
 from openai import OpenAI
+import os
+from dotenv import load_dotenv
 
-# ============================================
-# НАСТРОЙКИ
-# ============================================
-DEEPSEEK_API_KEY = "ВАШ_КЛЮЧ_ЗДЕСЬ"  # ВСТАВЬ СЮДА СВОЙ КЛЮЧ ОТ DEEPSEEK
+load_dotenv()  # Загружает переменные из .env
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 TOP_N = 10                    # Сколько лучших вакансий обрабатываем
 SLEEP_BETWEEN = 3             # Пауза между запросами (секунды)
 # ============================================
