@@ -1,33 +1,36 @@
 import json
 import time
-from openai import OpenAI
 import os
+from openai import OpenAI
 from dotenv import load_dotenv
 
-load_dotenv()  # Загружает переменные из .env
+load_dotenv()
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-BATCH_SIZE = 10               # Сколько вакансий отправлять за один запрос к LLM
-SLEEP_BETWEEN_BATCHES = 3     # Пауза между запросами (чтобы не словить rate limit)
+
+# ============================================
+# НАСТРОЙКИ
+# ============================================
+BATCH_SIZE = 10
+SLEEP_BETWEEN_BATCHES = 3
 # ============================================
 
-# Профиль кандидата — под него будем оценивать вакансии
+# Профиль кандидата с жестким фильтром на Junior
 CANDIDATE_PROFILE = """
-Кандидат: начинающий Python-разработчик, хочет работать в сфере автоматизации бизнес-процессов и AI-агентов.
-Навыки: Python, Playwright (автоматизация браузера), OpenAI SDK (работа с LLM), REST API, JSON, парсинг данных, работа с cookies/сессиями.
-Желаемая роль: Junior/Middle Python-разработчик (автоматизация), AI-инженер, RPA-разработчик, специалист по автоматизации бизнес-процессов.
+Кандидат: начинающий Python-разработчик (Junior/Стажер/Intern), хочет работать в сфере автоматизации бизнес-процессов и AI-агентов.
+Навыки: Python, Playwright, OpenAI SDK, REST API, JSON, парсинг данных, работа с cookies/сессиями.
+Желаемая роль: Junior Python-разработчик, AI-инженер (Junior), RPA-разработчик (Junior), Стажер.
 
 ГЕОГРАФИЯ И ФОРМАТ РАБОТЫ:
-- Идеально: удалённая работа (можно из любого города).
-- Хорошо: гибрид или офис в <ГОРОД>е или <ГОРОД>ой области.
-- Плохо: офис/гибрид в других городах (Москва, Питер и т.д.) без возможности удалёнки.
+- Идеально: удалённая работа.
+- Хорошо: гибрид или офис в <ГОРОД>е.
+- Плохо: офис/гибрид в других городах без возможности удалёнки.
 
-НЕ подходят: 1С-разработка, Java, C++, PHP, Senior-позиции, менеджеры по продажам, преподаватели, вакансии без Python, офис/гибрид в других регионах без удалёнки.
+ВАЖНО (УРОВЕНЬ ОПЫТА):
+- Ищем СТРОГО Junior, Intern, стажер, без опыта или с опытом 1 год.
+- Если в вакансии написано "Middle", "Middle+", "Senior", "Lead" или требуется опыт "от 2-3 лет", "3-6 лет" — ставь оценку 0-10.
+- Если требуется опыт "1-3 года" — оценивай внимательно, если стек совпадает, можешь поставить 40-60.
 
-ШКАЛА ОЦЕНОК:
-- 80-100: удалёнка + Python + автоматизация.
-- 60-79: гибрид/офис в <ГОРОД>е + Python + автоматизация, либо удалёнка с частичным совпадением.
-- 40-59: удалёнка, но стек совпадает частично, либо офис в <ГОРОД>е без автоматизации.
-- 0-39: офис/гибрид в другом городе без удалёнки, или не тот стек, или не тот уровень.
+НЕ подходят: 1С-разработка, Java, C++, PHP, менеджеры по продажам, преподаватели, вакансии без Python.
 """
 
 client = OpenAI(
@@ -37,8 +40,6 @@ client = OpenAI(
 
 
 def evaluate_batch(batch):
-    """Отправляет пачку вакансий в DeepSeek и получает оценки."""
-    # Формируем список вакансий для промпта
     vacancies_text = ""
     for i, v in enumerate(batch, start=1):
         vacancies_text += f"\n[{i}] Название: {v['title']}\nКомпания: {v['company']}\nОписание: {v['snippet']}\n"
@@ -53,13 +54,15 @@ def evaluate_batch(batch):
 
 ЗАДАЧА:
 Для каждой вакансии верни оценку от 0 до 100 (где 100 — идеальное совпадение) и короткую причину (1 предложение).
+ОБРАТИ ОСОБОЕ ВНИМАНИЕ НА УРОВЕНЬ ОПЫТА! Если это Middle/Senior/Lead — оценка должна быть низкой (0-10).
+
 Формат ответа — строго JSON-массив, без лишнего текста:
 [
   {{"index": 1, "score": 85, "reason": "Подходит: Python, автоматизация, junior-уровень"}},
-  {{"index": 2, "score": 10, "reason": "Не подходит: 1С, нет Python"}}
+  {{"index": 2, "score": 10, "reason": "Не подходит: Middle+, требуется опыт 3 года"}}
 ]
 
-Только JSON, без markdown-обёрток и пояснений.
+Только JSON, без markdown-оберток и пояснений.
 """
 
     response = client.chat.completions.create(
@@ -70,10 +73,8 @@ def evaluate_batch(batch):
 
 
 def parse_llm_response(text):
-    """Достаёт JSON из ответа LLM, даже если он обёрнут в ```json ... ```."""
     text = text.strip()
     if text.startswith("```"):
-        # Убираем markdown-обёртку
         text = text.split("```")[1]
         if text.startswith("json"):
             text = text[4:]
@@ -82,7 +83,10 @@ def parse_llm_response(text):
 
 
 def main():
-    # Загружаем собранные вакансии
+    if not os.path.exists("vacancies.json"):
+        print("❌ Файл vacancies.json не найден.")
+        return
+
     with open("vacancies.json", "r", encoding="utf-8") as f:
         vacancies = json.load(f)
 
@@ -102,7 +106,6 @@ def main():
             raw_response = evaluate_batch(batch)
             scores = parse_llm_response(raw_response)
 
-            # Сопоставляем оценки с вакансиями
             for item in scores:
                 idx = item["index"] - 1
                 if 0 <= idx < len(batch):
@@ -113,24 +116,19 @@ def main():
             print(f"   ✅ Обработано {len(scores)} вакансий")
         except Exception as e:
             print(f"   ❌ Ошибка: {e}")
-            # Если пачка упала — сохраняем её без оценок
             for v in batch:
                 v_copy = v.copy()
                 v_copy["score"] = -1
                 v_copy["reason"] = "Ошибка анализа"
                 analyzed.append(v_copy)
 
-        # Пауза между пачками
         time.sleep(SLEEP_BETWEEN_BATCHES)
 
-    # Сортируем по убыванию оценки
     analyzed.sort(key=lambda x: x.get("score", 0), reverse=True)
 
-    # Сохраняем результат
     with open("analyzed_vacancies.json", "w", encoding="utf-8") as f:
         json.dump(analyzed, f, ensure_ascii=False, indent=4)
 
-    # Считаем статистику
     top = [v for v in analyzed if v.get("score", 0) >= 70]
     middle = [v for v in analyzed if 40 <= v.get("score", 0) < 70]
     trash = [v for v in analyzed if v.get("score", 0) < 40]
@@ -142,12 +140,12 @@ def main():
     print(f"🤔 Средние (40-69): {len(middle)} вакансий")
     print(f"🗑️  Мусор (<40):     {len(trash)} вакансий")
     print(f"\n📁 Файл: analyzed_vacancies.json")
+
     print(f"\n🏆 ТОП-5 ЛУЧШИХ ВАКАНСИЙ:")
     for v in analyzed[:5]:
         print(f"\n   [{v.get('score')}/100] {v['title']}")
         print(f"   Компания: {v['company']}")
         print(f"   Причина: {v.get('reason')}")
-        print(f"   Ссылка: {v['link']}")
 
 
 if __name__ == "__main__":
