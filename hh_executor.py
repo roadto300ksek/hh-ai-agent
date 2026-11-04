@@ -42,7 +42,7 @@ def check_auth_on_main(page):
     try:
         page.goto("https://hh.ru", wait_until="domcontentloaded")
         page.wait_for_timeout(5000)
-    except Exception as e:
+    except Exception:
         return False
 
     auth_markers = [
@@ -56,20 +56,6 @@ def check_auth_on_main(page):
         return True
     return False
 
-def is_already_applied(page):
-    if page.locator('a:has-text("Перейти в чат")').count() > 0: return True
-    if page.locator('a:has-text("Оставить отзыв")').count() > 0: return True
-    if page.locator('text=Вы откликнулись').count() > 0: return True
-    if page.locator('text=Отклик отправлен').count() > 0: return True
-    if page.locator('[data-qa="vacancy-response-link-top"][href*="already"]').count() > 0: return True
-    
-    if page.locator('[data-qa="vacancy-response-link-top"]').count() == 0 and \
-       page.locator('[data-qa="vacancy-response-link-bottom"]').count() == 0 and \
-       page.locator('a:has-text("Откликнуться")').count() == 0 and \
-       page.locator('button:has-text("Откликнуться")').count() == 0:
-        return True
-    return False
-
 def check_questions(page):
     if page.locator('[data-qa="vacancy-response-question"]').count() > 0: return True
     if page.locator('button:has-text("Ответить на вопросы")').count() > 0: return True
@@ -77,10 +63,44 @@ def check_questions(page):
 
 def verify_response_sent(page):
     if page.locator('text=Отклик отправлен').count() > 0: return True
-    if page.locator('a:has-text("Перейти в чат")').count() > 0: return True
-    if page.locator('a:has-text("Оставить отзыв")').count() > 0: return True
     if page.locator('text=Вы откликнулись').count() > 0: return True
     return False
+
+def send_letter_in_chat(page, letter):
+    """Вспомогательная функция для отправки письма в чат"""
+    try:
+        # Ждем, пока появится поле ввода (textarea или contenteditable)
+        page.wait_for_selector('div[contenteditable="true"], textarea', timeout=10000)
+        
+        # Если есть кнопка "Добавить сопроводительное" - жмем
+        add_btn = page.locator('text="Добавить сопроводительное"').first
+        if add_btn.count() > 0 and add_btn.is_visible():
+            add_btn.click()
+            page.wait_for_timeout(2000)
+
+        # Ищем поле ввода
+        chat_input = page.locator('[data-qa="chatik-textarea"]').first
+        if chat_input.count() == 0:
+            chat_input = page.locator('div[contenteditable="true"]').first
+        if chat_input.count() == 0:
+            chat_input = page.locator('textarea').first
+
+        if chat_input.count() > 0:
+            chat_input.click()
+            page.wait_for_timeout(500)
+            chat_input.fill(letter)
+            page.wait_for_timeout(1000)
+            # В чатах hh.ru отправка по Enter - самый надежный способ
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(2000)
+            log("   ✅ ПИСЬМО ОТПРАВЛЕНО В ЧАТ!")
+            return True
+        else:
+            log("   ⚠️ Не нашел поле ввода для письма.")
+            return False
+    except Exception as e:
+        log(f"   ⚠️ Ошибка при вводе в чат: {e}")
+        return False
 
 def respond_to_vacancy(page, vacancy):
     link = vacancy["link"]
@@ -91,7 +111,7 @@ def respond_to_vacancy(page, vacancy):
 
     log(f"🌐 Открываю: {link}")
     page.goto(link, wait_until="domcontentloaded")
-    page.wait_for_timeout(random.randint(3000, 6000))
+    page.wait_for_timeout(random.randint(3000, 5000))
 
     if check_captcha(page):
         log("   🚨 КАПЧА! Останавливаю работу.")
@@ -102,12 +122,20 @@ def respond_to_vacancy(page, vacancy):
         add_sent_application(link, title, company, score, status="archived")
         return "archived"
 
-    if is_already_applied(page):
-        log(f"   ⏭️  Уже откликались ранее.")
+    # --- ПРОВЕРКА 1: МЫ УЖЕ В ЧАТЕ? (например, перешли по кнопке "Перейти в чат") ---
+    if page.locator('text="Добавить сопроводительное"').count() > 0 or page.locator('div[contenteditable="true"]').count() > 0:
+        log("   💬 Мы уже в чате. Отправляю письмо...")
+        send_letter_in_chat(page, letter)
+        add_sent_application(link, title, company, score, status="sent")
+        return "sent"
+
+    # --- ПРОВЕРКА 2: МЫ УЖЕ ОТКЛИКАЛИСЬ? ---
+    if page.locator('a:has-text("Перейти в чат")').count() > 0 or page.locator('text=Вы откликнулись').count() > 0:
+        log(f"   ⏭️  Уже откликались ранее (письмо не отправлено).")
         add_sent_application(link, title, company, score, status="already")
         return "already"
 
-    # Ищем кнопку "Откликнуться"
+    # --- ИЩЕМ КНОПКУ "ОТКЛИКНУТЬСЯ" ---
     respond_btn = page.locator('[data-qa="vacancy-response-link-top"]').first
     if respond_btn.count() == 0: respond_btn = page.locator('a:has-text("Откликнуться")').first
     if respond_btn.count() == 0: respond_btn = page.locator('button:has-text("Откликнуться")').first
@@ -118,64 +146,24 @@ def respond_to_vacancy(page, vacancy):
 
     try:
         respond_btn.click()
-    except Exception as e:
+    except Exception:
         return "click_error"
 
-    page.wait_for_timeout(random.randint(3000, 5000))
+    # Ждем прогрузки страницы отклика
+    page.wait_for_timeout(random.randint(4000, 6000))
 
     if check_captcha(page):
         return "captcha"
 
-    # === НОВЫЙ БЛОК: РАБОТА С ЧАТ-ИНТЕРФЕЙСОМ ===
-    # Ищем кнопку "Добавить сопроводительное" (как на твоем скриншоте)
-    add_letter_btn = page.locator('text="Добавить сопроводительное"').first
-    if add_letter_btn.count() == 0:
-        add_letter_btn = page.locator('button:has-text("Добавить сопроводительное")').first
-
-    if add_letter_btn.count() > 0 and add_letter_btn.is_visible():
-        log("   💬 Обнаружен чат. Добавляю сопроводительное письмо...")
-        try:
-            add_letter_btn.click()
-            page.wait_for_timeout(2000) # Ждем, пока появится поле ввода
-            
-            # Ищем поле ввода (может быть textarea или contenteditable)
-            chat_field = page.locator('textarea[placeholder*="сопроводительное"]').first
-            if chat_field.count() == 0:
-                chat_field = page.locator('textarea[placeholder*="Введите"]').first
-            if chat_field.count() == 0:
-                chat_field = page.locator('textarea').first
-
-            if chat_field.count() > 0:
-                chat_field.click()
-                chat_field.fill(letter)
-                log("   ✍️  Письмо вставлено")
-                page.wait_for_timeout(1000)
-                
-                # Ищем кнопку отправки (стрелочка или самолетик)
-                send_btn = page.locator('[data-qa="chatik-submit-button"]').first
-                if send_btn.count() == 0:
-                    send_btn = page.locator('button[type="submit"]').first
-                if send_btn.count() == 0:
-                    # Иногда это просто последняя кнопка с иконкой (svg) внутри формы
-                    send_btn = page.locator('button:has(svg)').last
-
-                if send_btn.count() > 0:
-                    send_btn.click()
-                    page.wait_for_timeout(2000)
-                    log(f"   ✅ ПИСЬМО ОТПРАВЛЕНО В ЧАТ!")
-                else:
-                    log("   ⚠️  Не нашел кнопку отправки в чате (возможно, нужно нажать Enter)")
-                    page.keyboard.press("Enter")
-            else:
-                log("   ⚠️  Не нашел поле ввода для письма в чате.")
-        except Exception as e:
-            log(f"   ⚠️  Ошибка при работе с чатом: {e}")
-            
-        # В чате резюме отправляется автоматически при клике на "Откликнуться"
+    # --- ПОСЛЕ КЛИКА: ЕСЛИ ОТКРЫЛСЯ ЧАТ ---
+    if page.locator('text="Добавить сопроводительное"').count() > 0 or page.locator('div[contenteditable="true"]').count() > 0:
+        log("   💬 Клик открыл чат. Отправляю письмо...")
+        send_letter_in_chat(page, letter)
         add_sent_application(link, title, company, score, status="sent")
         return "sent"
 
-    # === КЛАССИЧЕСКИЙ ПОПАП (СТАРЫЙ ИНТЕРФЕЙС) ===
+    # --- КЛАССИЧЕСКИЙ ПОПАП ---
+    log("   📋 Классический попап. Ищу поле для письма...")
     if check_questions(page):
         log("   ⚠️ Вопросы работодателя. В ручную очередь.")
         add_to_manual_queue(link, title, company, "Требуются ответы на вопросы")
@@ -205,7 +193,7 @@ def respond_to_vacancy(page, vacancy):
         try:
             submit_btn.click()
             page.wait_for_timeout(2000)
-            log(f"   ✅ ОТКЛИК ОТПРАВЛЕН!")
+            log(f"   ✅ ОТКЛИК ОТПРАВЛЕН (попап)!")
             add_sent_application(link, title, company, score, status="sent")
             return "sent"
         except Exception: pass
@@ -218,8 +206,6 @@ def respond_to_vacancy(page, vacancy):
 
 def main():
     os.makedirs(SHOT_DIR, exist_ok=True)
-    
-    # Инициализируем БД при запуске
     init_db()
 
     if not os.path.exists("cover_letters.json"):
@@ -229,16 +215,12 @@ def main():
     with open("cover_letters.json", "r", encoding="utf-8") as f:
         cover_letters = json.load(f)
 
-    # Получаем список уже отправленных из БД
     already_sent_links = get_sent_links()
-    
-    # Считаем лимит (упрощенно, просто смотрим сколько всего в базе)
-    # Для точного лимита за 24 часа нужно добавить запрос к БД по дате, но пока оставим так
     log(f"📊 Всего откликов в базе: {len(already_sent_links)}")
 
     to_send = [v for v in cover_letters if v["link"] not in already_sent_links]
     if not to_send:
-        log("🎉 Все письма из cover_letters.json уже обработаны (отправлены или архив).")
+        log("🎉 Все письма из cover_letters.json уже обработаны.")
         return
 
     to_send = to_send[:DAILY_LIMIT]
@@ -264,7 +246,7 @@ def main():
 
         try:
             for i, vacancy in enumerate(to_send, start=1):
-                log(f"\n{'='*60}\n📨 [{i}/{len(to_send)}] {vacancy['title']} — {vacancy['company']}\n{'='*60}")
+                log(f"\n{'='*60}\n📨 [{i}/{len(to_send)}] {vacancy['title']} - {vacancy['company']}\n{'='*60}")
                 
                 result = respond_to_vacancy(page, vacancy)
 
