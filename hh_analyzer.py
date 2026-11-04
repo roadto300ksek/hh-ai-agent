@@ -1,42 +1,21 @@
 import json
-import time
 import os
-from openai import OpenAI
-from dotenv import load_dotenv
+import sys
 
-load_dotenv()
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+from config import CANDIDATE_PROFILE, ask_llm
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 # ============================================
 # НАСТРОЙКИ
 # ============================================
 BATCH_SIZE = 10
-SLEEP_BETWEEN_BATCHES = 3
 # ============================================
 
-# Профиль кандидата с жестким фильтром на Junior
-CANDIDATE_PROFILE = """
-Кандидат: начинающий Python-разработчик (Junior/Стажер/Intern), хочет работать в сфере автоматизации бизнес-процессов и AI-агентов.
-Навыки: Python, Playwright, OpenAI SDK, REST API, JSON, парсинг данных, работа с cookies/сессиями.
-Желаемая роль: Junior Python-разработчик, AI-инженер (Junior), RPA-разработчик (Junior), Стажер.
-
-ГЕОГРАФИЯ И ФОРМАТ РАБОТЫ:
-- Идеально: удалённая работа.
-- Хорошо: гибрид или офис в <ГОРОД>е.
-- Плохо: офис/гибрид в других городах без возможности удалёнки.
-
-ВАЖНО (УРОВЕНЬ ОПЫТА):
-- Ищем СТРОГО Junior, Intern, стажер, без опыта или с опытом 1 год.
-- Если в вакансии написано "Middle", "Middle+", "Senior", "Lead" или требуется опыт "от 2-3 лет", "3-6 лет" — ставь оценку 0-10.
-- Если требуется опыт "1-3 года" — оценивай внимательно, если стек совпадает, можешь поставить 40-60.
-
-НЕ подходят: 1С-разработка, Java, C++, PHP, менеджеры по продажам, преподаватели, вакансии без Python.
-"""
-
-client = OpenAI(
-    base_url="https://api.deepseek.com",
-    api_key=DEEPSEEK_API_KEY,
-)
+ANALYZER_TEMPERATURE = 0.2
 
 
 def evaluate_batch(batch):
@@ -56,30 +35,47 @@ def evaluate_batch(batch):
 Для каждой вакансии верни оценку от 0 до 100 (где 100 — идеальное совпадение) и короткую причину (1 предложение).
 ОБРАТИ ОСОБОЕ ВНИМАНИЕ НА УРОВЕНЬ ОПЫТА! Если это Middle/Senior/Lead — оценка должна быть низкой (0-10).
 
-Формат ответа — строго JSON-массив, без лишнего текста:
-[
-  {{"index": 1, "score": 85, "reason": "Подходит: Python, автоматизация, junior-уровень"}},
-  {{"index": 2, "score": 10, "reason": "Не подходит: Middle+, требуется опыт 3 года"}}
-]
+Формат ответа — строго JSON-объект, без лишнего текста:
+{{
+  "results": [
+    {{"index": 1, "score": 85, "reason": "Подходит: Python, автоматизация, junior-уровень"}},
+    {{"index": 2, "score": 10, "reason": "Не подходит: Middle+, требуется опыт 3 года"}}
+  ]
+}}
 
 Только JSON, без markdown-оберток и пояснений.
 """
-
-    response = client.chat.completions.create(
-        model="deepseek-chat",
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return response.choices[0].message.content
+    return ask_llm(prompt, temperature=ANALYZER_TEMPERATURE, json_mode=True)
 
 
 def parse_llm_response(text):
+    """Достает список оценок из ответа модели, даже если тот обернут в markdown."""
     text = text.strip()
     if text.startswith("```"):
-        text = text.split("```")[1]
+        # ```json ... ``` -> берем содержимое между первым и последним ```
+        parts = text.split("```")
+        if len(parts) >= 2:
+            text = parts[1]
         if text.startswith("json"):
             text = text[4:]
     text = text.strip()
-    return json.loads(text)
+
+    if not text:
+        raise ValueError("Пустой ответ модели")
+
+    data = json.loads(text)
+
+    if isinstance(data, dict):
+        # json-режим возвращает объект: {"results": [...]}
+        for key in ("results", "vacancies", "items"):
+            if isinstance(data.get(key), list):
+                return data[key]
+        raise ValueError("В ответе модели нет списка с оценками")
+
+    if isinstance(data, list):
+        return data
+
+    raise ValueError("Неожиданный формат ответа модели")
 
 
 def main():
@@ -102,27 +98,38 @@ def main():
 
         print(f"📊 Пачка {batch_num}/{total_batches} (вакансии {i+1}-{i+len(batch)})...")
 
+        # Оценки по индексам: даже если модель ответила частично,
+        # ни одна вакансия не потеряется.
+        scores_by_index = {}
         try:
             raw_response = evaluate_batch(batch)
-            scores = parse_llm_response(raw_response)
-
-            for item in scores:
-                idx = item["index"] - 1
-                if 0 <= idx < len(batch):
-                    vacancy = batch[idx].copy()
-                    vacancy["score"] = item["score"]
-                    vacancy["reason"] = item["reason"]
-                    analyzed.append(vacancy)
-            print(f"   ✅ Обработано {len(scores)} вакансий")
+            for item in parse_llm_response(raw_response):
+                if not isinstance(item, dict) or "index" not in item:
+                    continue
+                try:
+                    index = int(item["index"])
+                    score = int(item["score"])
+                except (TypeError, ValueError):
+                    continue
+                scores_by_index[index] = {
+                    "score": score,
+                    "reason": str(item.get("reason", "")).strip(),
+                }
         except Exception as e:
             print(f"   ❌ Ошибка: {e}")
-            for v in batch:
-                v_copy = v.copy()
-                v_copy["score"] = -1
-                v_copy["reason"] = "Ошибка анализа"
-                analyzed.append(v_copy)
 
-        time.sleep(SLEEP_BETWEEN_BATCHES)
+        for position, vacancy in enumerate(batch, start=1):
+            item = scores_by_index.get(position)
+            vacancy = vacancy.copy()
+            if item:
+                vacancy["score"] = item["score"]
+                vacancy["reason"] = item["reason"] or "Без пояснения"
+            else:
+                vacancy["score"] = -1
+                vacancy["reason"] = "Ошибка анализа"
+            analyzed.append(vacancy)
+
+        print(f"   ✅ Оценено {len(scores_by_index)} из {len(batch)}")
 
     analyzed.sort(key=lambda x: x.get("score", 0), reverse=True)
 
@@ -131,7 +138,8 @@ def main():
 
     top = [v for v in analyzed if v.get("score", 0) >= 70]
     middle = [v for v in analyzed if 40 <= v.get("score", 0) < 70]
-    trash = [v for v in analyzed if v.get("score", 0) < 40]
+    trash = [v for v in analyzed if 0 <= v.get("score", 0) < 40]
+    errors = [v for v in analyzed if v.get("score", 0) < 0]
 
     print(f"\n{'='*50}")
     print(f"✅ АНАЛИЗ ЗАВЕРШЁН")
@@ -139,7 +147,12 @@ def main():
     print(f"🔥 Топ (70+):       {len(top)} вакансий")
     print(f"🤔 Средние (40-69): {len(middle)} вакансий")
     print(f"🗑️  Мусор (<40):     {len(trash)} вакансий")
+    if errors:
+        print(f"⚠️  Не оценено:      {len(errors)} вакансий")
     print(f"\n📁 Файл: analyzed_vacancies.json")
+
+    if not analyzed:
+        return
 
     print(f"\n🏆 ТОП-5 ЛУЧШИХ ВАКАНСИЙ:")
     for v in analyzed[:5]:

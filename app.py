@@ -6,18 +6,24 @@ import sys
 import os
 from datetime import datetime
 
+from database import DB_PATH, init_db
+
 # Настройка страницы
 st.set_page_config(page_title="HH AI-Agent", page_icon="🤖", layout="wide")
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # --- Функции для работы с БД ---
 def get_db_data(query):
+    """Читает данные из SQLite. Ошибку не прячем — покажем её в интерфейсе."""
+    conn = sqlite3.connect(DB_PATH)
     try:
-        conn = sqlite3.connect('hh_agent.db')
-        df = pd.read_sql_query(query, conn)
+        return pd.read_sql_query(query, conn)
+    finally:
         conn.close()
-        return df
-    except Exception as e:
-        return pd.DataFrame()
+
+# Создаем таблицы, если база еще не инициализирована
+init_db()
 
 # --- Боковая панель (Управление) ---
 with st.sidebar:
@@ -28,8 +34,8 @@ with st.sidebar:
     st.subheader("🚀 Запуск агентов")
     if st.button("Запустить полный цикл (Run All)", use_container_width=True, type="primary"):
         st.toast("Агент запущен! Проверь консоль для просмотра логов.", icon="🚀")
-        # Запускаем run_all.py в фоне
-        subprocess.Popen([sys.executable, "run_all.py"])
+        # Запускаем run_all.py в фоне из папки проекта
+        subprocess.Popen([sys.executable, os.path.join(BASE_DIR, "run_all.py")], cwd=BASE_DIR)
     
     if st.button("Обновить данные", use_container_width=True):
         st.rerun()
@@ -42,8 +48,12 @@ st.title("🤖 Панель управления AI-агентом")
 st.markdown("Автоматизация поиска и отклика на вакансии HeadHunter")
 
 # Считаем статистику
-sent_df = get_db_data("SELECT * FROM sent_applications ORDER BY sent_at DESC")
-queue_df = get_db_data("SELECT * FROM manual_queue ORDER BY added_at DESC")
+try:
+    sent_df = get_db_data("SELECT * FROM sent_applications ORDER BY sent_at DESC")
+    queue_df = get_db_data("SELECT * FROM manual_queue ORDER BY added_at DESC")
+except Exception as e:
+    st.error(f"Не удалось прочитать базу данных {DB_PATH}: {e}")
+    st.stop()
 
 # Метрики
 col1, col2, col3 = st.columns(3)
@@ -54,7 +64,7 @@ with col2:
 with col3:
     # Считаем отправленные сегодня
     today = datetime.now().strftime("%Y-%m-%d")
-    sent_today = len(sent_df[sent_df['sent_at'].str.startswith(today)]) if not sent_df.empty else 0
+    sent_today = len(sent_df[sent_df['sent_at'].fillna('').str.startswith(today)]) if not sent_df.empty else 0
     st.metric(label="📅 Отправлено сегодня", value=sent_today)
 
 st.markdown("---")

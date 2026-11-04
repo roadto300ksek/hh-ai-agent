@@ -1,6 +1,11 @@
 import subprocess
 import sys
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 def run_step(script_name, description):
     print(f"\n{'='*70}")
     print(f"🚀 ЭТАП: {description}")

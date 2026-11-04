@@ -1,0 +1,5 @@
+playwright>=1.63
+openai>=2.0
+python-dotenv>=1.0
+streamlit>=1.40
+pandas>=2.0

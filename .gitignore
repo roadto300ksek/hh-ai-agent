@@ -1,8 +1,8 @@
-# Секретные данные
+# Секреты и сессии
 hh_state.json
 .env
 
-# Результаты работы скриптов и отладка
+# Рабочие данные (генерируются скриптами)
 vacancies.json
 analyzed_vacancies.json
 cover_letters.json
@@ -11,6 +11,6 @@ manual_queue.json
 executor_screenshots
 debug_page.html
 debug_screenshot.png
-__pycache__
-.pyc
+__pycache__/
+*.pyc
 *.db

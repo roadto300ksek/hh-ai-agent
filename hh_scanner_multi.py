@@ -1,7 +1,15 @@
 from playwright.sync_api import sync_playwright
+from urllib.parse import urlencode
 import json
+import sys
 import time
 import random
+
+# Консоль Windows по умолчанию не умеет emoji — иначе скрипт падает на print
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 # ============================================
 # НАСТРОЙКИ ПАРАНОИКА (можно менять)
@@ -11,7 +19,20 @@ MAX_DELAY_BETWEEN_QUERIES = 25   # максимум секунд между за
 SCROLL_STEPS = 5                 # сколько раз прокрутить страницу вниз
 SCROLL_PAUSE_MIN = 2             # минимум секунд между прокрутками
 SCROLL_PAUSE_MAX = 4             # максимум секунд между прокрутками
+SEARCH_PAGES = 2                 # сколько страниц выдачи собирать на запрос
 # ============================================
+
+# Фильтры на стороне hh.ru: не тратим токены LLM на заведомо неподходящее.
+# area=113 — вся Россия. id города можно посмотреть в URL поиска на hh.ru.
+# experience: noExperience,between1And3 — junior/стажёр и до 3 лет.
+# schedule=remote — удалёнка (убери, если нужны офис и гибрид в <ГОРОД>е).
+SEARCH_FILTERS = {
+    "area": "113",
+    "experience": "noExperience,between1And3",
+    "schedule": "remote",
+    "order_by": "publication_time",
+    "items_on_page": "50",
+}
 
 # Список поисковых запросов. Можешь дополнять своими.
 SEARCH_QUERIES = [
@@ -48,10 +69,16 @@ def human_scroll(page):
     time.sleep(1)
 
 
-def scrape_query(page, query):
-    """Собирает вакансии по одному запросу."""
-    url = f"https://hh.ru/search/vacancy?text={query}"
-    print(f"\n🔍 Ищу: {query}")
+def build_search_url(query, page_num):
+    """Собирает URL поиска с фильтрами и номером страницы."""
+    params = {"text": query, "page": page_num, **SEARCH_FILTERS}
+    return f"https://hh.ru/search/vacancy?{urlencode(params)}"
+
+
+def scrape_query(page, query, page_num=0):
+    """Собирает вакансии по одному запросу с одной страницы выдачи."""
+    url = build_search_url(query, page_num)
+    print(f"\n🔍 Ищу: {query} (страница {page_num + 1})")
     print(f"   URL: {url}")
 
     try:
@@ -72,7 +99,6 @@ def scrape_query(page, query):
             print("   🚨 КАПЧА! Пройди её вручную в браузере, потом нажми Enter в консоли...")
             input()
 
-    # ← ИСПРАВЛЕННЫЙ СЕЛЕКТОР
     cards = page.locator('[data-qa="vacancy-serp__vacancy"]').all()
     print(f"   Найдено карточек: {len(cards)}")
 
@@ -88,8 +114,19 @@ def scrape_query(page, query):
             company_el = card.locator('[data-qa="vacancy-serp__vacancy-employer"]').first
             company = company_el.inner_text().strip() if company_el.count() > 0 else "Не указана"
 
-            snippet_el = card.locator('[data-qa="vacancy-serp__vacancy_snippet_responsibility"]').first
-            snippet = snippet_el.inner_text().strip() if snippet_el.count() > 0 else ""
+            # Берем и обязанности, и требования: без требований LLM не видит
+            # уровень опыта (Junior/Middle/Senior) и оценивает вслепую.
+            snippet_parts = []
+            for qa in (
+                "vacancy-serp__vacancy_snippet_responsibility",
+                "vacancy-serp__vacancy_snippet_requirement",
+            ):
+                snippet_el = card.locator(f'[data-qa="{qa}"]').first
+                if snippet_el.count() > 0:
+                    text = snippet_el.inner_text().strip()
+                    if text:
+                        snippet_parts.append(text)
+            snippet = " ".join(snippet_parts)
 
             result.append({
                 "title": title,
@@ -140,13 +177,22 @@ def scrape_hh():
             print(f"📊 Запрос {idx}/{total_queries}")
             print(f"{'='*50}")
 
-            vacancies = scrape_query(page, query)
-            new_count = 0
-            for v in vacancies:
-                if v["link"] and v["link"] not in all_vacancies:
-                    all_vacancies[v["link"]] = v
-                    new_count += 1
-            print(f"   ➕ Новых уникальных: {new_count}")
+            for page_num in range(SEARCH_PAGES):
+                vacancies = scrape_query(page, query, page_num)
+
+                new_count = 0
+                for v in vacancies:
+                    if v["link"] and v["link"] not in all_vacancies:
+                        all_vacancies[v["link"]] = v
+                        new_count += 1
+                print(f"   ➕ Новых уникальных: {new_count}")
+
+                # Дошли до конца выдачи — дальше страницы листать незачем
+                if not vacancies:
+                    break
+
+                if page_num < SEARCH_PAGES - 1:
+                    human_delay(5, 10)
 
             if idx < total_queries:
                 human_delay(MIN_DELAY_BETWEEN_QUERIES, MAX_DELAY_BETWEEN_QUERIES)

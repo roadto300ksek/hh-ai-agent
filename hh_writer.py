@@ -1,49 +1,42 @@
 import json
-import time
 import os
-from openai import OpenAI
-import os
-from dotenv import load_dotenv
+import sys
 
-load_dotenv()  # Загружает переменные из .env
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-TOP_N = 10                    # Сколько лучших вакансий обрабатываем
-SLEEP_BETWEEN = 3             # Пауза между запросами (секунды)
+from config import CANDIDATE_INFO, ask_llm
+from database import get_manual_queue, get_sent_links, init_db
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 # ============================================
-
-CANDIDATE_INFO = """
-Имя: <ИМЯ>
-Город: <ГОРОД>
-Формат работы: удалёнка (приоритет) или гибрид/офис в <ГОРОД>е
-Резюме: Python-разработчик, специализация — автоматизация бизнес-процессов и AI-агенты.
-
-Опыт и навыки:
-- Python (основной язык)
-- Playwright (автоматизация браузера, обход антибот-защиты, парсинг)
-- OpenAI SDK / DeepSeek API (интеграция LLM в продукты)
-- REST API, JSON, работа с cookies/сессиями
-- Git, Flask
-
-Пет-проекты:
-1. Telegram-бот для изучения иностранных языков (Python, OpenAI API, Flask, gTTS, Git).
-2. Мультиагентная система для автоматизации поиска работы на HeadHunter (Python, Playwright, LLM, REST API).
-
-Тон письма: уверенный, но без пафоса. Деловой, живой, без штампов типа "стрессоустойчивый" и "командный игрок".
-"""
-
-client = OpenAI(
-    base_url="https://api.deepseek.com",
-    api_key=DEEPSEEK_API_KEY,
-)
-
-LOG_FILE = "sent_log.json"
+# НАСТРОЙКИ
+# ============================================
+TOP_N = 10                    # Сколько новых вакансий обрабатываем за раз
+WRITER_TEMPERATURE = 0.7
+LETTERS_FILE = "cover_letters.json"
+# ============================================
 
 
 def load_json(path, default):
     if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
+        # utf-8-sig — чтобы файлы, отредактированные в Блокноте с BOM, не ломали запуск
+        with open(path, "r", encoding="utf-8-sig") as f:
             return json.load(f)
     return default
+
+
+def load_pending_letters():
+    """Письма из прошлого запуска, которые ещё не были отправлены.
+
+    Раньше файл перезаписывался целиком, и неотправленные письма терялись
+    (например, если исполнитель упёрся в капчу).
+    """
+    letters = load_json(LETTERS_FILE, [])
+    if not isinstance(letters, list):
+        return []
+    return [item for item in letters if isinstance(item, dict) and item.get("link")]
 
 
 def generate_letter(vacancy):
@@ -74,43 +67,51 @@ def generate_letter(vacancy):
 
 Верни ТОЛЬКО текст письма, без пояснений и без markdown.
 """
-    response = client.chat.completions.create(
-        model="deepseek-chat",
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return response.choices[0].message.content.strip()
+    return ask_llm(prompt, temperature=WRITER_TEMPERATURE).strip()
 
 
 def main():
+    init_db()
+
     # Загружаем проанализированные вакансии
     if not os.path.exists("analyzed_vacancies.json"):
         print("❌ Файл analyzed_vacancies.json не найден. Сначала запусти hh_analyzer.py")
         return
 
-    with open("analyzed_vacancies.json", "r", encoding="utf-8") as f:
+    with open("analyzed_vacancies.json", "r", encoding="utf-8-sig") as f:
         all_vacancies = json.load(f)
 
-    # Загружаем список уже отправленных
-    sent_log = load_json(LOG_FILE, {"sent_links": [], "history": []})
-    already_sent = set(sent_log.get("sent_links", []))
+    # Отправленные берем из SQLite, а не из устаревшего sent_log.json
+    already_sent = get_sent_links()
+    manual_links = {item["link"] for item in get_manual_queue()}
+
+    # Неотправленные письма прошлого запуска сохраняем
+    pending = [
+        item for item in load_pending_letters()
+        if item["link"] not in already_sent and item["link"] not in manual_links
+    ]
 
     print(f"📂 Всего вакансий в базе: {len(all_vacancies)}")
     print(f"📤 Уже отправлено откликов: {len(already_sent)}")
+    if pending:
+        print(f"📝 Неотправленных писем с прошлого запуска: {len(pending)}")
 
-    # Фильтруем: топ с оценкой >= 70, исключая уже отправленные
+    busy_links = already_sent | manual_links | {item["link"] for item in pending}
+
+    # Фильтруем: топ с оценкой >= 70, исключая уже обработанные
     top_vacancies = [
         v for v in all_vacancies
-        if v.get("score", 0) >= 70 and v.get("link") not in already_sent
+        if v.get("score", 0) >= 70 and v.get("link") not in busy_links
     ][:TOP_N]
 
-    if not top_vacancies:
+    if not top_vacancies and not pending:
         print("🎉 Нет новых вакансий для генерации писем. Все топовые уже отработаны.")
         return
 
     print(f"🔥 Новых топовых вакансий (70+): {len(top_vacancies)}")
     print(f"✍️  Генерирую письма...\n")
 
-    results = []
+    results = list(pending)
 
     for i, vacancy in enumerate(top_vacancies, start=1):
         print(f"[{i}/{len(top_vacancies)}] {vacancy['title']} — {vacancy['company']}")
@@ -129,15 +130,14 @@ def main():
         except Exception as e:
             print(f"   ❌ Ошибка: {e}")
 
-        time.sleep(SLEEP_BETWEEN)
-
-    # Сохраняем результат
-    with open("cover_letters.json", "w", encoding="utf-8") as f:
+    # Сохраняем результат, не теряя неотправленные письма прошлых запусков
+    with open(LETTERS_FILE, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=4)
 
     print(f"\n{'='*50}")
-    print(f"✅ ГОТОВО! Сгенерировано {len(results)} писем.")
-    print(f"📁 Файл: cover_letters.json")
+    print(f"✅ ГОТОВО! Писем в очереди: {len(results)} "
+          f"(новых: {len(results) - len(pending)})")
+    print(f"📁 Файл: {LETTERS_FILE}")
     print(f"{'='*50}")
 
     if results:

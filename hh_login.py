@@ -1,4 +1,10 @@
 from playwright.sync_api import sync_playwright
+import sys
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 def save_session():
     with sync_playwright() as p:

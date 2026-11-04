@@ -7,7 +7,10 @@ import sys
 from datetime import datetime, timedelta
 from database import init_db, get_sent_links, add_sent_application, get_manual_queue, add_to_manual_queue
 
-sys.stdout.reconfigure(line_buffering=True)
+try:
+    sys.stdout.reconfigure(line_buffering=True, encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 # ============================================
 # НАСТРОЙКИ
@@ -47,12 +50,12 @@ def check_auth_on_main(page):
 
     auth_markers = [
         '[data-qa="mainmenu_applicantProfile"]', '[data-qa="mainmenu_myResumes"]',
-        'a[href="/applicant/resumes"]', 'a[href*="applicant/resumes"]', '[data-qa="account-menu-button"]'
+        'a[href="/applicant/resumes"]', '[data-qa="account-menu-button"]'
     ]
     for marker in auth_markers:
         if page.locator(marker).count() > 0:
             return True
-    if page.locator('text=Мои резюме').count() > 0 or page.locator('text=Резюме и профиль').count() > 0:
+    if page.locator('text=Мои резюме').count() > 0:
         return True
     return False
 
@@ -66,40 +69,59 @@ def verify_response_sent(page):
     if page.locator('text=Вы откликнулись').count() > 0: return True
     return False
 
-def send_letter_in_chat(page, letter):
-    """Вспомогательная функция для отправки письма в чат"""
-    try:
-        # Ждем, пока появится поле ввода (textarea или contenteditable)
-        page.wait_for_selector('div[contenteditable="true"], textarea', timeout=10000)
-        
-        # Если есть кнопка "Добавить сопроводительное" - жмем
-        add_btn = page.locator('text="Добавить сопроводительное"').first
-        if add_btn.count() > 0 and add_btn.is_visible():
-            add_btn.click()
-            page.wait_for_timeout(2000)
+# Тексты, которыми hh.ru сообщает, что отклик НЕ ушел
+SEND_ERROR_MARKERS = [
+    'text=Не удалось отправить',
+    'text=Произошла ошибка',
+    'text=Попробуйте ещё раз',
+    'text=Отклик не отправлен',
+]
 
-        # Ищем поле ввода
-        chat_input = page.locator('[data-qa="chatik-textarea"]').first
+def check_send_error(page):
+    for marker in SEND_ERROR_MARKERS:
+        if page.locator(marker).count() > 0:
+            return True
+    return False
+
+def send_letter_in_chat(page, letter):
+    """Агрессивная функция отправки письма в чате"""
+    log("   💬 Пытаюсь отправить письмо в чате...")
+    try:
+        # 1. Ждем кнопку "Добавить сопроводительное"
+        add_btn = page.locator('text=Добавить сопроводительное').first
+        if add_btn.count() > 0 and add_btn.is_visible():
+            log("   🖱️ Нажимаю 'Добавить сопроводительное'...")
+            add_btn.click()
+            page.wait_for_timeout(2500) # Даем время форме открыться
+
+        # 2. Ищем поле ввода (textarea или contenteditable)
+        chat_input = page.locator('textarea').first
         if chat_input.count() == 0:
             chat_input = page.locator('div[contenteditable="true"]').first
         if chat_input.count() == 0:
-            chat_input = page.locator('textarea').first
+            chat_input = page.locator('[data-qa="chatik-textarea"]').first
 
         if chat_input.count() > 0:
+            log("   ⌨️ Ввожу текст...")
             chat_input.click()
             page.wait_for_timeout(500)
+            chat_input.fill("") # Очищаем
+            page.wait_for_timeout(200)
             chat_input.fill(letter)
             page.wait_for_timeout(1000)
-            # В чатах hh.ru отправка по Enter - самый надежный способ
+            
+            # Отправляем по Enter (работает в 99% чатов hh)
             page.keyboard.press("Enter")
             page.wait_for_timeout(2000)
+            
             log("   ✅ ПИСЬМО ОТПРАВЛЕНО В ЧАТ!")
             return True
         else:
-            log("   ⚠️ Не нашел поле ввода для письма.")
+            log("   ❌ Не нашел поле ввода в чате.")
+            page.screenshot(path=f"{SHOT_DIR}/chat_no_input_{datetime.now().strftime('%H%M%S')}.png")
             return False
     except Exception as e:
-        log(f"   ⚠️ Ошибка при вводе в чат: {e}")
+        log(f"   ⚠️ Ошибка в чате: {e}")
         return False
 
 def respond_to_vacancy(page, vacancy):
@@ -122,16 +144,19 @@ def respond_to_vacancy(page, vacancy):
         add_sent_application(link, title, company, score, status="archived")
         return "archived"
 
-    # --- ПРОВЕРКА 1: МЫ УЖЕ В ЧАТЕ? (например, перешли по кнопке "Перейти в чат") ---
-    if page.locator('text="Добавить сопроводительное"').count() > 0 or page.locator('div[contenteditable="true"]').count() > 0:
-        log("   💬 Мы уже в чате. Отправляю письмо...")
-        send_letter_in_chat(page, letter)
-        add_sent_application(link, title, company, score, status="sent")
-        return "sent"
+    # --- ПРОВЕРКА 1: МЫ УЖЕ В ЧАТЕ? (например, ты зашел вручную) ---
+    if page.locator('text=Добавить сопроводительное').count() > 0 or page.locator('div[contenteditable="true"]').count() > 0:
+        log("   💬 Обнаружен интерфейс чата.")
+        if send_letter_in_chat(page, letter):
+            add_sent_application(link, title, company, score, status="sent")
+            return "sent"
+        log("   ⚠️ Письмо в чат отправить не удалось.")
+        add_to_manual_queue(link, title, company, "Не удалось отправить письмо в чате")
+        return "chat_failed"
 
-    # --- ПРОВЕРКА 2: МЫ УЖЕ ОТКЛИКАЛИСЬ? ---
+    # --- ПРОВЕРКА 2: МЫ УЖЕ ОТКЛИКАЛИСЬ РАНЕЕ? ---
     if page.locator('a:has-text("Перейти в чат")').count() > 0 or page.locator('text=Вы откликнулись').count() > 0:
-        log(f"   ⏭️  Уже откликались ранее (письмо не отправлено).")
+        log(f"   ⏭️  Уже откликались ранее.")
         add_sent_application(link, title, company, score, status="already")
         return "already"
 
@@ -149,18 +174,20 @@ def respond_to_vacancy(page, vacancy):
     except Exception:
         return "click_error"
 
-    # Ждем прогрузки страницы отклика
     page.wait_for_timeout(random.randint(4000, 6000))
 
     if check_captcha(page):
         return "captcha"
 
     # --- ПОСЛЕ КЛИКА: ЕСЛИ ОТКРЫЛСЯ ЧАТ ---
-    if page.locator('text="Добавить сопроводительное"').count() > 0 or page.locator('div[contenteditable="true"]').count() > 0:
+    if page.locator('text=Добавить сопроводительное').count() > 0 or page.locator('div[contenteditable="true"]').count() > 0:
         log("   💬 Клик открыл чат. Отправляю письмо...")
-        send_letter_in_chat(page, letter)
-        add_sent_application(link, title, company, score, status="sent")
-        return "sent"
+        if send_letter_in_chat(page, letter):
+            add_sent_application(link, title, company, score, status="sent")
+            return "sent"
+        log("   ⚠️ Письмо в чат отправить не удалось.")
+        add_to_manual_queue(link, title, company, "Не удалось отправить письмо в чате")
+        return "chat_failed"
 
     # --- КЛАССИЧЕСКИЙ ПОПАП ---
     log("   📋 Классический попап. Ищу поле для письма...")
@@ -192,11 +219,20 @@ def respond_to_vacancy(page, vacancy):
     if submit_btn.count() > 0:
         try:
             submit_btn.click()
-            page.wait_for_timeout(2000)
-            log(f"   ✅ ОТКЛИК ОТПРАВЛЕН (попап)!")
-            add_sent_application(link, title, company, score, status="sent")
-            return "sent"
-        except Exception: pass
+            page.wait_for_timeout(2500)
+        except Exception as e:
+            log(f"   ⚠️ Не удалось нажать 'Отправить': {e}")
+            return "click_error"
+
+        # Не считаем отклик отправленным, если hh.ru показал ошибку
+        if check_send_error(page):
+            log("   ❌ hh.ru сообщил об ошибке отправки.")
+            add_to_manual_queue(link, title, company, "Ошибка отправки отклика")
+            return "send_error"
+
+        log(f"   ✅ ОТКЛИК ОТПРАВЛЕН (попап)!")
+        add_sent_application(link, title, company, score, status="sent")
+        return "sent"
 
     if verify_response_sent(page):
         add_sent_application(link, title, company, score, status="sent")
@@ -258,7 +294,7 @@ def main():
                 elif result == "captcha":
                     log("🛑 Капча. Останавливаюсь.")
                     break
-                elif result in ("no_button", "no_submit", "click_error"):
+                elif result in ("no_button", "no_submit", "click_error", "chat_failed", "send_error"):
                     consecutive_errors += 1
                     if consecutive_errors >= 3:
                         log("🛑 Три ошибки подряд. Стоп.")
