@@ -1,17 +1,32 @@
-import sqlite3
+from database import get_conn, init_db
+from utils import configure_stdout
 
-# Подключаемся к базе
-conn = sqlite3.connect('hh_agent.db')
-cursor = conn.cursor()
+configure_stdout()
 
-print("=== ОТПРАВЛЕННЫЕ ОТКЛИКИ ===")
-cursor.execute("SELECT title, company, score, status, sent_at FROM sent_applications")
-for row in cursor.fetchall():
-    print(f"[{row[2]}] {row[0]} — {row[1]} (Статус: {row[3]}, Время: {row[4]})")
 
-print("\n=== РУЧНАЯ ОЧЕРЕДЬ ===")
-cursor.execute("SELECT title, company, reason FROM manual_queue")
-for row in cursor.fetchall():
-    print(f"{row[0]} — {row[1]} (Причина: {row[2]})")
+def main():
+    init_db()
 
-conn.close()
+    with get_conn() as conn:
+        print("=== ОТПРАВЛЕННЫЕ ОТКЛИКИ ===")
+        rows = conn.execute(
+            "SELECT title, company, score, status, sent_at FROM sent_applications "
+            "ORDER BY sent_at DESC"
+        ).fetchall()
+        if not rows:
+            print("Пока пусто.")
+        for title, company, score, status, sent_at in rows:
+            print(f"[{score}] {title} — {company} (Статус: {status}, Время: {sent_at})")
+
+        print("\n=== РУЧНАЯ ОЧЕРЕДЬ ===")
+        queue = conn.execute(
+            "SELECT title, company, reason FROM manual_queue ORDER BY added_at DESC"
+        ).fetchall()
+        if not queue:
+            print("Очередь пуста.")
+        for title, company, reason in queue:
+            print(f"{title} — {company} (Причина: {reason})")
+
+
+if __name__ == "__main__":
+    main()

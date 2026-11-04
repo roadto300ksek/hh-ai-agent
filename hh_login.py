@@ -1,61 +1,48 @@
-from playwright.sync_api import sync_playwright
 import sys
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-except Exception:
-    pass
+from playwright.sync_api import sync_playwright
+
+from hh_browser import launch_context
+from paths import STATE_FILE
+from utils import configure_stdout
+
+configure_stdout()
+
 
 def save_session():
     with sync_playwright() as p:
-        # Маскируемся под обычный Chrome, чтобы hh.ru не блокировал
-        browser = p.chromium.launch(
-            headless=False,  # Видимый режим обязателен для ручного входа
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
-        )
-
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1366, "height": 768},
-            locale="ru-RU",
-            timezone_id="Europe/Moscow",
-        )
-
-        # Скрываем факт, что это бот
-        context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-        """)
-
-        page = context.new_page()
-
-        print("🌐 Загружаю hh.ru...")
+        # Видимый режим обязателен для ручного входа, сессию пока не подставляем
+        browser, context = launch_context(p, headless=False, use_state=False)
         try:
-            # Ждём только DOM (структуру), а не все картинки и рекламу
-            page.goto("https://hh.ru", wait_until="domcontentloaded", timeout=60000)
-        except Exception as e:
-            print(f"⚠️ Первая попытка не удалась: {e}")
-            print("🔄 Пробую ещё раз...")
-            page.goto("https://hh.ru", wait_until="domcontentloaded", timeout=60000)
+            page = context.new_page()
 
-        print("👉 Пожалуйста, залогинься вручную в открывшемся окне браузера.")
-        print("👉 После успешного входа нажми Enter в этой консоли...")
-        
-        # Ждём, пока ты нажмёшь Enter в консоли
-        input()
+            print("🌐 Загружаю hh.ru...")
+            last_error = None
+            for attempt in range(1, 3):
+                try:
+                    page.goto("https://hh.ru", wait_until="domcontentloaded", timeout=60000)
+                    last_error = None
+                    break
+                except Exception as e:
+                    last_error = e
+                    print(f"⚠️ Попытка {attempt}/2 не удалась: {e}")
+            if last_error:
+                print("🛑 Не удалось открыть hh.ru. Проверь интернет и попробуй снова.")
+                return
 
-        # Сохраняем состояние сессии (cookies, localStorage) в файл
-        context.storage_state(path="hh_state.json")
-        print("✅ Сессия сохранена в файл hh_state.json")
+            print("👉 Пожалуйста, залогинься вручную в открывшемся окне браузера.")
+            print("👉 После успешного входа нажми Enter в этой консоли...")
 
-        browser.close()
+            if not sys.stdin or not sys.stdin.isatty():
+                print("🛑 Нет интерактивной консоли — запусти hh_login.py из терминала.")
+                return
+
+            input()
+            context.storage_state(path=str(STATE_FILE))
+            print(f"✅ Сессия сохранена в файл {STATE_FILE.name}")
+        finally:
+            browser.close()
+
 
 if __name__ == "__main__":
     save_session()

@@ -5,10 +5,13 @@ import time
 from dotenv import load_dotenv
 from openai import OpenAI
 
-load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+from paths import ENV_FILE
+
+load_dotenv(ENV_FILE)
 
 MODEL_NAME = "deepseek-chat"
 BASE_URL = "https://api.deepseek.com"
+REQUEST_TIMEOUT = 60
 
 # ============================================
 # ПРОФИЛЬ КАНДИДАТА (используется анализатором)
@@ -55,7 +58,7 @@ CANDIDATE_INFO = """
 """
 
 
-def get_client():
+def get_client(timeout=REQUEST_TIMEOUT):
     """Создает клиент DeepSeek. Понятно падает, если ключ не настроен."""
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
@@ -63,10 +66,19 @@ def get_client():
             "DEEPSEEK_API_KEY не найден. Создай файл .env и добавь строку "
             "DEEPSEEK_API_KEY=твой_ключ"
         )
-    return OpenAI(base_url=BASE_URL, api_key=api_key)
+    # max_retries=0: повторы делает ask_llm, чтобы не ждать дважды
+    return OpenAI(base_url=BASE_URL, api_key=api_key, timeout=timeout, max_retries=0)
 
 
-def ask_llm(prompt, temperature=0.2, json_mode=False, retries=3, base_delay=3):
+def _is_retryable(error):
+    """401/403/400/404 — ошибки конфигурации, повторять их бессмысленно."""
+    status = getattr(error, "status_code", None)
+    if status in (400, 401, 403, 404):
+        return False
+    return True
+
+
+def ask_llm(prompt, temperature=0.2, json_mode=False, retries=3, base_delay=2):
     """Запрос к LLM с повторами и экспоненциальной паузой.
 
     Один сбой сети или лимита больше не роняет всю пачку вакансий.
@@ -83,13 +95,17 @@ def ask_llm(prompt, temperature=0.2, json_mode=False, retries=3, base_delay=3):
                 temperature=temperature,
                 **extra,
             )
-            return response.choices[0].message.content
+            content = response.choices[0].message.content
+            if content is None or not content.strip():
+                raise ValueError("Модель вернула пустой ответ")
+            return content
         except Exception as e:
             last_error = e
-            if attempt < retries:
-                delay = base_delay * (2 ** (attempt - 1))
-                print(f"   ⚠️ Ошибка LLM (попытка {attempt}/{retries}): {e}")
-                print(f"   🔄 Повтор через {delay} сек...")
-                time.sleep(delay)
+            if not _is_retryable(e) or attempt == retries:
+                break
+            delay = base_delay * (2 ** (attempt - 1))
+            print(f"   ⚠️ Ошибка LLM (попытка {attempt}/{retries}): {e}")
+            print(f"   🔄 Повтор через {delay} сек...")
+            time.sleep(delay)
 
     raise last_error

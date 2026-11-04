@@ -1,16 +1,21 @@
-from playwright.sync_api import sync_playwright
-import json
-import time
 import random
-import os
-import sys
-from datetime import datetime, timedelta
-from database import init_db, get_sent_links, add_sent_application, get_manual_queue, add_to_manual_queue
+import time
+from datetime import datetime
 
-try:
-    sys.stdout.reconfigure(line_buffering=True, encoding="utf-8", errors="replace")
-except Exception:
-    pass
+from playwright.sync_api import sync_playwright
+
+from database import (
+    add_sent_application,
+    add_to_manual_queue,
+    get_sent_links,
+    get_today_sent_count,
+    init_db,
+)
+from hh_browser import launch_context
+from paths import COVER_LETTERS_FILE, SCREENSHOT_DIR
+from utils import configure_stdout, has_visible, log, try_read_json
+
+configure_stdout(line_buffering=True)
 
 # ============================================
 # НАСТРОЙКИ
@@ -19,57 +24,8 @@ DAILY_LIMIT = 50
 MIN_DELAY_SEC = 300
 MAX_DELAY_SEC = 900
 HEADLESS = False
-SHOT_DIR = "executor_screenshots"
 # ============================================
 
-def log(message):
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    print(f"[{timestamp}] {message}", flush=True)
-
-def random_delay():
-    delay = random.uniform(MIN_DELAY_SEC, MAX_DELAY_SEC)
-    minutes = delay / 60
-    log(f"⏳ Пауза {minutes:.1f} мин перед следующим откликом...")
-    try:
-        time.sleep(delay)
-    except KeyboardInterrupt:
-        log("🛑 Пауза прервана пользователем.")
-        raise
-
-def check_captcha(page):
-    if page.locator('iframe[src*="captcha"]').count() > 0 or "captcha" in page.url.lower():
-        return True
-    return False
-
-def check_auth_on_main(page):
-    try:
-        page.goto("https://hh.ru", wait_until="domcontentloaded")
-        page.wait_for_timeout(5000)
-    except Exception:
-        return False
-
-    auth_markers = [
-        '[data-qa="mainmenu_applicantProfile"]', '[data-qa="mainmenu_myResumes"]',
-        'a[href="/applicant/resumes"]', '[data-qa="account-menu-button"]'
-    ]
-    for marker in auth_markers:
-        if page.locator(marker).count() > 0:
-            return True
-    if page.locator('text=Мои резюме').count() > 0:
-        return True
-    return False
-
-def check_questions(page):
-    if page.locator('[data-qa="vacancy-response-question"]').count() > 0: return True
-    if page.locator('button:has-text("Ответить на вопросы")').count() > 0: return True
-    return False
-
-def verify_response_sent(page):
-    if page.locator('text=Отклик отправлен').count() > 0: return True
-    if page.locator('text=Вы откликнулись').count() > 0: return True
-    return False
-
-# Тексты, которыми hh.ru сообщает, что отклик НЕ ушел
 SEND_ERROR_MARKERS = [
     'text=Не удалось отправить',
     'text=Произошла ошибка',
@@ -77,58 +33,135 @@ SEND_ERROR_MARKERS = [
     'text=Отклик не отправлен',
 ]
 
+ERROR_RESULTS = {
+    "no_button",
+    "no_submit",
+    "click_error",
+    "chat_failed",
+    "send_error",
+    "exception",
+}
+
+
+def random_delay():
+    delay = random.uniform(MIN_DELAY_SEC, MAX_DELAY_SEC)
+    log(f"⏳ Пауза {delay / 60:.1f} мин перед следующим откликом...")
+    try:
+        time.sleep(delay)
+    except KeyboardInterrupt:
+        log("🛑 Пауза прервана пользователем.")
+        raise
+
+
+def check_captcha(page):
+    if "captcha" in page.url.lower():
+        return True
+    return has_visible(page, 'iframe[src*="captcha"]')
+
+
+def check_auth_on_main(page):
+    """Возвращает 'ok', 'captcha' или 'no'."""
+    try:
+        page.goto("https://hh.ru", wait_until="domcontentloaded")
+        page.wait_for_timeout(5000)
+    except Exception:
+        return "no"
+
+    if check_captcha(page):
+        return "captcha"
+
+    auth_markers = [
+        '[data-qa="mainmenu_applicantProfile"]',
+        '[data-qa="mainmenu_myResumes"]',
+        'a[href="/applicant/resumes"]',
+        '[data-qa="account-menu-button"]',
+    ]
+    for marker in auth_markers:
+        if has_visible(page, marker):
+            return "ok"
+    if has_visible(page, 'text=Мои резюме'):
+        return "ok"
+    return "no"
+
+
+def check_questions(page):
+    return (
+        has_visible(page, '[data-qa="vacancy-response-question"]')
+        or has_visible(page, 'button:has-text("Ответить на вопросы")')
+    )
+
+
+def verify_response_sent(page):
+    return (
+        has_visible(page, 'text=Отклик отправлен')
+        or has_visible(page, 'text=Вы откликнулись')
+    )
+
+
 def check_send_error(page):
-    for marker in SEND_ERROR_MARKERS:
-        if page.locator(marker).count() > 0:
-            return True
-    return False
+    return any(has_visible(page, marker) for marker in SEND_ERROR_MARKERS)
+
+
+def take_screenshot(page, prefix):
+    SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    path = SCREENSHOT_DIR / f"{prefix}_{datetime.now():%H%M%S}.png"
+    try:
+        page.screenshot(path=str(path))
+    except Exception:
+        pass
+
 
 def send_letter_in_chat(page, letter):
-    """Агрессивная функция отправки письма в чате"""
+    """Отправляет письмо в чате и проверяет, что hh.ru не показал ошибку."""
     log("   💬 Пытаюсь отправить письмо в чате...")
     try:
-        # 1. Ждем кнопку "Добавить сопроводительное"
         add_btn = page.locator('text=Добавить сопроводительное').first
         if add_btn.count() > 0 and add_btn.is_visible():
             log("   🖱️ Нажимаю 'Добавить сопроводительное'...")
             add_btn.click()
-            page.wait_for_timeout(2500) # Даем время форме открыться
+            page.wait_for_timeout(2500)
 
-        # 2. Ищем поле ввода (textarea или contenteditable)
         chat_input = page.locator('textarea').first
         if chat_input.count() == 0:
             chat_input = page.locator('div[contenteditable="true"]').first
         if chat_input.count() == 0:
             chat_input = page.locator('[data-qa="chatik-textarea"]').first
 
-        if chat_input.count() > 0:
-            log("   ⌨️ Ввожу текст...")
-            chat_input.click()
-            page.wait_for_timeout(500)
-            chat_input.fill("") # Очищаем
-            page.wait_for_timeout(200)
-            chat_input.fill(letter)
-            page.wait_for_timeout(1000)
-            
-            # Отправляем по Enter (работает в 99% чатов hh)
-            page.keyboard.press("Enter")
-            page.wait_for_timeout(2000)
-            
-            log("   ✅ ПИСЬМО ОТПРАВЛЕНО В ЧАТ!")
-            return True
-        else:
+        if chat_input.count() == 0:
             log("   ❌ Не нашел поле ввода в чате.")
-            page.screenshot(path=f"{SHOT_DIR}/chat_no_input_{datetime.now().strftime('%H%M%S')}.png")
+            take_screenshot(page, "chat_no_input")
             return False
+
+        log("   ⌨️ Ввожу текст...")
+        chat_input.click()
+        page.wait_for_timeout(500)
+        chat_input.fill("")
+        page.wait_for_timeout(200)
+        chat_input.fill(letter)
+        page.wait_for_timeout(1000)
+
+        # Отправляем по Enter (работает в 99% чатов hh)
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(2000)
+
+        if check_send_error(page):
+            log("   ❌ hh.ru сообщил об ошибке отправки в чате.")
+            take_screenshot(page, "chat_send_error")
+            return False
+
+        log("   ✅ Письмо отправлено в чат.")
+        return True
     except Exception as e:
         log(f"   ⚠️ Ошибка в чате: {e}")
+        take_screenshot(page, "chat_exception")
         return False
+
 
 def respond_to_vacancy(page, vacancy):
     link = vacancy["link"]
-    title = vacancy["title"]
-    company = vacancy["company"]
-    letter = vacancy["cover_letter"]
+    title = vacancy.get("title", "")
+    company = vacancy.get("company", "")
+    letter = vacancy.get("cover_letter", "")
     score = vacancy.get("score", 0)
 
     log(f"🌐 Открываю: {link}")
@@ -139,34 +172,35 @@ def respond_to_vacancy(page, vacancy):
         log("   🚨 КАПЧА! Останавливаю работу.")
         return "captcha"
 
-    if page.locator('text=Вакансия в архиве').count() > 0:
-        log(f"   ⏭️  Вакансия в архиве. Пропуск.")
+    if has_visible(page, 'text=Вакансия в архиве'):
+        log("   ⏭️  Вакансия в архиве. Пропуск.")
         add_sent_application(link, title, company, score, status="archived")
         return "archived"
 
     # --- ПРОВЕРКА 1: МЫ УЖЕ В ЧАТЕ? (например, ты зашел вручную) ---
-    if page.locator('text=Добавить сопроводительное').count() > 0 or page.locator('div[contenteditable="true"]').count() > 0:
+    if has_visible(page, 'text=Добавить сопроводительное') or has_visible(page, 'div[contenteditable="true"]'):
         log("   💬 Обнаружен интерфейс чата.")
         if send_letter_in_chat(page, letter):
             add_sent_application(link, title, company, score, status="sent")
             return "sent"
-        log("   ⚠️ Письмо в чат отправить не удалось.")
         add_to_manual_queue(link, title, company, "Не удалось отправить письмо в чате")
         return "chat_failed"
 
     # --- ПРОВЕРКА 2: МЫ УЖЕ ОТКЛИКАЛИСЬ РАНЕЕ? ---
-    if page.locator('a:has-text("Перейти в чат")').count() > 0 or page.locator('text=Вы откликнулись').count() > 0:
-        log(f"   ⏭️  Уже откликались ранее.")
+    if has_visible(page, 'a:has-text("Перейти в чат")') or has_visible(page, 'text=Вы откликнулись'):
+        log("   ⏭️  Уже откликались ранее.")
         add_sent_application(link, title, company, score, status="already")
         return "already"
 
     # --- ИЩЕМ КНОПКУ "ОТКЛИКНУТЬСЯ" ---
     respond_btn = page.locator('[data-qa="vacancy-response-link-top"]').first
-    if respond_btn.count() == 0: respond_btn = page.locator('a:has-text("Откликнуться")').first
-    if respond_btn.count() == 0: respond_btn = page.locator('button:has-text("Откликнуться")').first
+    if respond_btn.count() == 0:
+        respond_btn = page.locator('a:has-text("Откликнуться")').first
+    if respond_btn.count() == 0:
+        respond_btn = page.locator('button:has-text("Откликнуться")').first
 
     if respond_btn.count() == 0:
-        log(f"   ❌ Кнопка 'Откликнуться' не найдена.")
+        log("   ❌ Кнопка 'Откликнуться' не найдена.")
         return "no_button"
 
     try:
@@ -180,12 +214,11 @@ def respond_to_vacancy(page, vacancy):
         return "captcha"
 
     # --- ПОСЛЕ КЛИКА: ЕСЛИ ОТКРЫЛСЯ ЧАТ ---
-    if page.locator('text=Добавить сопроводительное').count() > 0 or page.locator('div[contenteditable="true"]').count() > 0:
+    if has_visible(page, 'text=Добавить сопроводительное') or has_visible(page, 'div[contenteditable="true"]'):
         log("   💬 Клик открыл чат. Отправляю письмо...")
         if send_letter_in_chat(page, letter):
             add_sent_application(link, title, company, score, status="sent")
             return "sent"
-        log("   ⚠️ Письмо в чат отправить не удалось.")
         add_to_manual_queue(link, title, company, "Не удалось отправить письмо в чате")
         return "chat_failed"
 
@@ -209,12 +242,14 @@ def respond_to_vacancy(page, vacancy):
             letter_field.click()
             letter_field.fill(letter)
             log("   ✍️  Письмо вставлено в попап")
-        except Exception: pass
+        except Exception:
+            pass
 
     page.wait_for_timeout(1500)
 
     submit_btn = page.locator('[data-qa="vacancy-response-submit-popup"]').first
-    if submit_btn.count() == 0: submit_btn = page.locator('button:has-text("Отправить")').first
+    if submit_btn.count() == 0:
+        submit_btn = page.locator('button:has-text("Отправить")').first
 
     if submit_btn.count() > 0:
         try:
@@ -230,7 +265,7 @@ def respond_to_vacancy(page, vacancy):
             add_to_manual_queue(link, title, company, "Ошибка отправки отклика")
             return "send_error"
 
-        log(f"   ✅ ОТКЛИК ОТПРАВЛЕН (попап)!")
+        log("   ✅ ОТКЛИК ОТПРАВЛЕН (попап)!")
         add_sent_application(link, title, company, score, status="sent")
         return "sent"
 
@@ -240,61 +275,94 @@ def respond_to_vacancy(page, vacancy):
 
     return "no_submit"
 
+
+def build_queue(cover_letters, already_sent, limit):
+    """Валидные письма без дублей, которые ещё не отправлены."""
+    result = []
+    seen = set(already_sent)
+    for vacancy in cover_letters:
+        if not isinstance(vacancy, dict):
+            continue
+        link = vacancy.get("link")
+        letter = vacancy.get("cover_letter")
+        if not link or not letter or link in seen:
+            continue
+        seen.add(link)
+        result.append(vacancy)
+        if len(result) >= limit:
+            break
+    return result
+
+
 def main():
-    os.makedirs(SHOT_DIR, exist_ok=True)
     init_db()
 
-    if not os.path.exists("cover_letters.json"):
-        print("❌ Файл cover_letters.json не найден.")
+    cover_letters = try_read_json(COVER_LETTERS_FILE, None)
+    if cover_letters is None:
+        print("❌ Файл cover_letters.json не найден или поврежден.")
+        return
+    if not isinstance(cover_letters, list):
+        print("❌ cover_letters.json имеет неверный формат.")
         return
 
-    with open("cover_letters.json", "r", encoding="utf-8") as f:
-        cover_letters = json.load(f)
+    already_sent = get_sent_links()
+    sent_today = get_today_sent_count()
+    remaining = max(0, DAILY_LIMIT - sent_today)
 
-    already_sent_links = get_sent_links()
-    log(f"📊 Всего откликов в базе: {len(already_sent_links)}")
+    log(f"📊 Всего откликов в базе: {len(already_sent)}")
+    log(f"📅 Отправлено сегодня: {sent_today}/{DAILY_LIMIT}")
 
-    to_send = [v for v in cover_letters if v["link"] not in already_sent_links]
+    if remaining == 0:
+        log("🛑 Дневной лимит исчерпан. Возвращайся завтра.")
+        return
+
+    to_send = build_queue(cover_letters, already_sent, remaining)
     if not to_send:
         log("🎉 Все письма из cover_letters.json уже обработаны.")
         return
 
-    to_send = to_send[:DAILY_LIMIT]
+    log(f"📨 К отправке за запуск: {len(to_send)}")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=HEADLESS, args=["--disable-blink-features=AutomationControlled", "--no-sandbox"])
-        context = browser.new_context(
-            storage_state="hh_state.json",
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            viewport={"width": 1366, "height": 768}, locale="ru-RU", timezone_id="Europe/Moscow"
-        )
-        context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
-        page = context.new_page()
-
-        log("🔐 Проверяю авторизацию...")
-        if not check_auth_on_main(page):
-            log("🛑 Не удалось подтвердить авторизацию.")
-            browser.close()
+        try:
+            browser, context = launch_context(p, headless=HEADLESS)
+        except FileNotFoundError as e:
+            log(f"🛑 {e}")
             return
 
-        sent_count = 0
-        consecutive_errors = 0
-
         try:
+            page = context.new_page()
+
+            log("🔐 Проверяю авторизацию...")
+            auth = check_auth_on_main(page)
+            if auth == "captcha":
+                log("🛑 Капча на главной. Реши её вручную и запусти снова.")
+                return
+            if auth != "ok":
+                log("🛑 Не удалось подтвердить авторизацию. Запусти hh_login.py.")
+                return
+
+            sent_count = 0
+            consecutive_errors = 0
+
             for i, vacancy in enumerate(to_send, start=1):
-                log(f"\n{'='*60}\n📨 [{i}/{len(to_send)}] {vacancy['title']} - {vacancy['company']}\n{'='*60}")
-                
-                result = respond_to_vacancy(page, vacancy)
+                log(f"\n{'='*60}\n📨 [{i}/{len(to_send)}] {vacancy.get('title')} - {vacancy.get('company')}\n{'='*60}")
+
+                try:
+                    result = respond_to_vacancy(page, vacancy)
+                except Exception as e:
+                    log(f"   ❌ Исключение: {e}")
+                    result = "exception"
 
                 if result == "sent":
                     sent_count += 1
                     consecutive_errors = 0
-                elif result in ("already", "archived"):
+                elif result in ("already", "archived", "manual_questions"):
                     consecutive_errors = 0
                 elif result == "captcha":
                     log("🛑 Капча. Останавливаюсь.")
                     break
-                elif result in ("no_button", "no_submit", "click_error", "chat_failed", "send_error"):
+                elif result in ERROR_RESULTS:
                     consecutive_errors += 1
                     if consecutive_errors >= 3:
                         log("🛑 Три ошибки подряд. Стоп.")
@@ -307,11 +375,15 @@ def main():
 
         except KeyboardInterrupt:
             log("\n🛑 СТОП по команде пользователя (Ctrl+C).")
+        finally:
+            try:
+                browser.close()
+            except Exception:
+                pass
 
-        try: browser.close()
-        except: pass
+    log(f"\n✅ ГОТОВО. Отправлено за запуск: {sent_count}.")
+    log(f"📅 Всего сегодня: {get_today_sent_count()}/{DAILY_LIMIT}. В базе: {len(get_sent_links())}")
 
-    log(f"\n✅ ГОТОВО. Отправлено за запуск: {sent_count}. Всего в базе: {len(get_sent_links())}")
 
 if __name__ == "__main__":
     main()

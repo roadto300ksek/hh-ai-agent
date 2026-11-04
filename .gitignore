@@ -11,6 +11,18 @@ manual_queue.json
 executor_screenshots
 debug_page.html
 debug_screenshot.png
+run_all.log
+*.log
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+
+# SQLite (включая WAL-файлы)
 *.db
+*.db-wal
+*.db-shm

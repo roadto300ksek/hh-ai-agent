@@ -1,15 +1,15 @@
-from playwright.sync_api import sync_playwright
 from urllib.parse import urlencode
-import json
+import random
 import sys
 import time
-import random
 
-# Консоль Windows по умолчанию не умеет emoji — иначе скрипт падает на print
-try:
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-except Exception:
-    pass
+from playwright.sync_api import sync_playwright
+
+from hh_browser import launch_context
+from paths import VACANCIES_FILE
+from utils import configure_stdout, try_read_json, write_json
+
+configure_stdout()
 
 # ============================================
 # НАСТРОЙКИ ПАРАНОИКА (можно менять)
@@ -20,6 +20,7 @@ SCROLL_STEPS = 5                 # сколько раз прокрутить с
 SCROLL_PAUSE_MIN = 2             # минимум секунд между прокрутками
 SCROLL_PAUSE_MAX = 4             # максимум секунд между прокрутками
 SEARCH_PAGES = 2                 # сколько страниц выдачи собирать на запрос
+NAVIGATION_ATTEMPTS = 2
 # ============================================
 
 # Фильтры на стороне hh.ru: не тратим токены LLM на заведомо неподходящее.
@@ -50,6 +51,11 @@ SEARCH_QUERIES = [
     "автоматизация рутинных задач",
 ]
 
+CARD_SELECTORS = [
+    '[data-qa="vacancy-serp__vacancy"]',
+    '[data-qa="serp-item"]',
+]
+
 
 def human_delay(min_sec, max_sec):
     """Случайная пауза, чтобы поведение не выглядело роботом."""
@@ -60,56 +66,81 @@ def human_delay(min_sec, max_sec):
 
 def human_scroll(page):
     """Плавная прокрутка страницы с паузами, как будто человек читает."""
-    for step in range(SCROLL_STEPS):
-        scroll_by = random.randint(400, 900)
-        page.mouse.wheel(0, scroll_by)
-        pause = random.uniform(SCROLL_PAUSE_MIN, SCROLL_PAUSE_MAX)
-        time.sleep(pause)
+    for _ in range(SCROLL_STEPS):
+        page.mouse.wheel(0, random.randint(400, 900))
+        time.sleep(random.uniform(SCROLL_PAUSE_MIN, SCROLL_PAUSE_MAX))
     page.mouse.wheel(0, -300)
     time.sleep(1)
 
 
-def build_search_url(query, page_num):
+def build_search_url(query, page_num=0, filters=None):
     """Собирает URL поиска с фильтрами и номером страницы."""
-    params = {"text": query, "page": page_num, **SEARCH_FILTERS}
+    params = {"text": query, "page": page_num, **(filters or SEARCH_FILTERS)}
     return f"https://hh.ru/search/vacancy?{urlencode(params)}"
 
 
-def scrape_query(page, query, page_num=0):
-    """Собирает вакансии по одному запросу с одной страницы выдачи."""
-    url = build_search_url(query, page_num)
-    print(f"\n🔍 Ищу: {query} (страница {page_num + 1})")
-    print(f"   URL: {url}")
+def normalize_link(link):
+    if not link:
+        return None
+    link = link.split("?")[0]
+    if link.startswith("/"):
+        link = f"https://hh.ru{link}"
+    return link
 
-    try:
-        page.goto(url, wait_until="domcontentloaded")
-        page.wait_for_timeout(random.randint(4000, 7000))
-    except Exception as e:
-        print(f"   ⚠️ Не удалось открыть страницу: {e}")
-        return []
 
-    # Плавная прокрутка вниз — подгружаем все карточки
-    human_scroll(page)
+def is_captcha_page(page):
+    if "captcha" in page.url.lower():
+        return True
+    return page.locator('iframe[src*="captcha.hh.ru"]').count() > 0
 
-    # Проверяем, не вылезла ли капча
-    if page.locator('iframe[src*="captcha"]').count() > 0 and "recaptcha" not in page.url.lower():
-        # Более точная проверка — только реальные капчи hh.ru
-        captcha_visible = page.locator('iframe[src*="captcha.hh.ru"]').count() > 0
-        if captcha_visible:
-            print("   🚨 КАПЧА! Пройди её вручную в браузере, потом нажми Enter в консоли...")
-            input()
 
-    cards = page.locator('[data-qa="vacancy-serp__vacancy"]').all()
+def wait_for_captcha(page):
+    """Возвращает True, если можно продолжать. Без консоли не блокируем весь pipeline."""
+    if not is_captcha_page(page):
+        return True
+
+    print("   🚨 КАПЧА!")
+    if not sys.stdin or not sys.stdin.isatty():
+        print("   Консоли нет (запуск из дашборда) — пропускаю запрос.")
+        return False
+
+    input("   Пройди капчу в браузере и нажми Enter...")
+    return True
+
+
+def navigate(page, url):
+    """Открывает страницу с одной повторной попыткой."""
+    for attempt in range(1, NAVIGATION_ATTEMPTS + 1):
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(random.randint(4000, 7000))
+            return True
+        except Exception as e:
+            print(f"   ⚠️ Попытка {attempt}/{NAVIGATION_ATTEMPTS} не удалась: {e}")
+            if attempt < NAVIGATION_ATTEMPTS:
+                time.sleep(3)
+    return False
+
+
+def parse_cards(page):
+    """Парсит карточки выдачи. Возвращает только валидные записи."""
+    cards = []
+    for selector in CARD_SELECTORS:
+        cards = page.locator(selector).all()
+        if cards:
+            break
     print(f"   Найдено карточек: {len(cards)}")
 
     result = []
     for card in cards:
         try:
             title_el = card.locator('[data-qa="serp-item__title"]').first
+            if title_el.count() == 0:
+                continue
             title = title_el.inner_text().strip()
-            link = title_el.get_attribute("href")
-            if link and "?" in link:
-                link = link.split("?")[0]
+            link = normalize_link(title_el.get_attribute("href"))
+            if not title or not link:
+                continue
 
             company_el = card.locator('[data-qa="vacancy-serp__vacancy-employer"]').first
             company = company_el.inner_text().strip() if company_el.count() > 0 else "Не указана"
@@ -126,87 +157,95 @@ def scrape_query(page, query, page_num=0):
                     text = snippet_el.inner_text().strip()
                     if text:
                         snippet_parts.append(text)
-            snippet = " ".join(snippet_parts)
 
             result.append({
                 "title": title,
                 "company": company,
                 "link": link,
-                "snippet": snippet,
-                "found_by": query,
+                "snippet": " ".join(snippet_parts),
+                "found_by": "",
             })
         except Exception as e:
             print(f"   ⚠️ Ошибка парсинга карточки: {e}")
     return result
 
 
+def scrape_query(page, query, page_num=0):
+    """Собирает вакансии по одному запросу с одной страницы выдачи."""
+    url = build_search_url(query, page_num)
+    print(f"\n🔍 Ищу: {query} (страница {page_num + 1})")
+    print(f"   URL: {url}")
+
+    if not navigate(page, url):
+        return []
+    if not wait_for_captcha(page):
+        return []
+
+    # Плавная прокрутка вниз — подгружаем все карточки
+    human_scroll(page)
+
+    vacancies = parse_cards(page)
+    for vacancy in vacancies:
+        vacancy["found_by"] = query
+    return vacancies
+
+
 def scrape_hh():
     all_vacancies = {}
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=False,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
-        )
+        try:
+            browser, context = launch_context(p, headless=False)
+        except FileNotFoundError as e:
+            print(f"🛑 {e}")
+            return
 
-        context = browser.new_context(
-            storage_state="hh_state.json",
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1366, "height": 768},
-            locale="ru-RU",
-            timezone_id="Europe/Moscow",
-        )
+        try:
+            page = context.new_page()
+            total_queries = len(SEARCH_QUERIES)
 
-        context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-        """)
+            for idx, query in enumerate(SEARCH_QUERIES, start=1):
+                print(f"\n{'='*50}")
+                print(f"📊 Запрос {idx}/{total_queries}")
+                print(f"{'='*50}")
 
-        page = context.new_page()
+                for page_num in range(SEARCH_PAGES):
+                    vacancies = scrape_query(page, query, page_num)
 
-        total_queries = len(SEARCH_QUERIES)
-        for idx, query in enumerate(SEARCH_QUERIES, start=1):
-            print(f"\n{'='*50}")
-            print(f"📊 Запрос {idx}/{total_queries}")
-            print(f"{'='*50}")
+                    new_count = 0
+                    for v in vacancies:
+                        link = v["link"]
+                        if link not in all_vacancies:
+                            all_vacancies[link] = v
+                            new_count += 1
+                    print(f"   ➕ Новых уникальных: {new_count}")
 
-            for page_num in range(SEARCH_PAGES):
-                vacancies = scrape_query(page, query, page_num)
+                    # Дошли до конца выдачи — дальше страницы листать незачем
+                    if not vacancies:
+                        break
 
-                new_count = 0
-                for v in vacancies:
-                    if v["link"] and v["link"] not in all_vacancies:
-                        all_vacancies[v["link"]] = v
-                        new_count += 1
-                print(f"   ➕ Новых уникальных: {new_count}")
+                    if page_num < SEARCH_PAGES - 1:
+                        human_delay(5, 10)
 
-                # Дошли до конца выдачи — дальше страницы листать незачем
-                if not vacancies:
-                    break
-
-                if page_num < SEARCH_PAGES - 1:
-                    human_delay(5, 10)
-
-            if idx < total_queries:
-                human_delay(MIN_DELAY_BETWEEN_QUERIES, MAX_DELAY_BETWEEN_QUERIES)
-
-        browser.close()
+                if idx < total_queries:
+                    human_delay(MIN_DELAY_BETWEEN_QUERIES, MAX_DELAY_BETWEEN_QUERIES)
+        finally:
+            browser.close()
 
     final_list = list(all_vacancies.values())
 
-    with open("vacancies.json", "w", encoding="utf-8") as f:
-        json.dump(final_list, f, ensure_ascii=False, indent=4)
+    if not final_list:
+        old = try_read_json(VACANCIES_FILE, [])
+        old_count = len(old) if isinstance(old, list) else 0
+        print("\n⚠️ Не найдено ни одной вакансии (капча/блокировка/селекторы).")
+        print(f"📁 Старый {VACANCIES_FILE.name} сохранен ({old_count} вакансий).")
+        return
+
+    write_json(VACANCIES_FILE, final_list)
 
     print(f"\n{'='*50}")
     print(f"✅ ИТОГО уникальных вакансий: {len(final_list)}")
-    print(f"📁 Файл: vacancies.json")
+    print(f"📁 Файл: {VACANCIES_FILE.name}")
     print(f"{'='*50}")
 
 

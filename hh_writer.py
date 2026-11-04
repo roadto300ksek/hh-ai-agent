@@ -1,55 +1,94 @@
 import json
-import os
-import sys
 
 from config import CANDIDATE_INFO, ask_llm
 from database import get_manual_queue, get_sent_links, init_db
+from paths import ANALYZED_FILE, COVER_LETTERS_FILE
+from utils import (
+    backup_file,
+    configure_stdout,
+    read_json,
+    try_read_json,
+    write_json,
+)
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-except Exception:
-    pass
+configure_stdout()
 
 # ============================================
 # НАСТРОЙКИ
 # ============================================
 TOP_N = 10                    # Сколько новых вакансий обрабатываем за раз
 WRITER_TEMPERATURE = 0.7
-LETTERS_FILE = "cover_letters.json"
+MIN_LETTER_LENGTH = 80        # Короче — считаем, что модель сломалась
+GENERATION_ATTEMPTS = 2
 # ============================================
 
 
-def load_json(path, default):
-    if os.path.exists(path):
-        # utf-8-sig — чтобы файлы, отредактированные в Блокноте с BOM, не ломали запуск
-        with open(path, "r", encoding="utf-8-sig") as f:
-            return json.load(f)
-    return default
+def normalize_letters(items):
+    """Оставляет только корректные письма и убирает дубликаты по ссылке."""
+    if not isinstance(items, list):
+        return []
+    result = []
+    seen = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        link = item.get("link")
+        if not link or link in seen:
+            continue
+        seen.add(link)
+        result.append(item)
+    return result
+
+
+def select_pending(letters, sent_links, manual_links):
+    """Письма прошлых запусков, которые ещё не отправлены и не ушли в ручную очередь."""
+    return [
+        item for item in normalize_letters(letters)
+        if item["link"] not in sent_links and item["link"] not in manual_links
+    ]
+
+
+def select_new(analyzed, busy_links, limit=TOP_N, min_score=70):
+    """Топовые вакансии, которых ещё нет в работе."""
+    result = []
+    seen = set(busy_links)
+    for vacancy in analyzed:
+        if not isinstance(vacancy, dict):
+            continue
+        link = vacancy.get("link")
+        if not link or link in seen:
+            continue
+        if vacancy.get("score", 0) < min_score:
+            continue
+        result.append(vacancy)
+        seen.add(link)
+        if len(result) >= limit:
+            break
+    return result
 
 
 def load_pending_letters():
-    """Письма из прошлого запуска, которые ещё не были отправлены.
-
-    Раньше файл перезаписывался целиком, и неотправленные письма терялись
-    (например, если исполнитель упёрся в капчу).
-    """
-    letters = load_json(LETTERS_FILE, [])
-    if not isinstance(letters, list):
+    """Читает cover_letters.json. Битый файл откладывает в .broken, а не теряет молча."""
+    try:
+        return normalize_letters(read_json(COVER_LETTERS_FILE, []))
+    except (json.JSONDecodeError, OSError) as e:
+        backup = backup_file(COVER_LETTERS_FILE)
+        suffix = f", копия: {backup.name}" if backup else ""
+        print(f"⚠️ cover_letters.json поврежден ({e}){suffix}")
         return []
-    return [item for item in letters if isinstance(item, dict) and item.get("link")]
 
 
 def generate_letter(vacancy):
-    """Генерирует сопроводительное письмо под конкретную вакансию."""
+    """Генерирует письмо и проверяет, что модель вернула текст, а не пустоту."""
     prompt = f"""Ты — опытный карьерный консультант. Напиши короткое сопроводительное письмо для отклика на вакансию.
 
 ИНФОРМАЦИЯ О КАНДИДАТЕ:
 {CANDIDATE_INFO}
 
 ВАКАНСИЯ:
-Название: {vacancy['title']}
-Компания: {vacancy['company']}
-Описание: {vacancy['snippet']}
+Название: {vacancy.get('title', '')}
+Компания: {vacancy.get('company', '')}
+Описание: {vacancy.get('snippet', '')}
 
 ТРЕБОВАНИЯ К ПИСЬМУ:
 - Длина: 4-6 предложений (не больше!).
@@ -67,87 +106,86 @@ def generate_letter(vacancy):
 
 Верни ТОЛЬКО текст письма, без пояснений и без markdown.
 """
-    return ask_llm(prompt, temperature=WRITER_TEMPERATURE).strip()
+    last_error = None
+    for attempt in range(1, GENERATION_ATTEMPTS + 1):
+        try:
+            letter = ask_llm(prompt, temperature=WRITER_TEMPERATURE).strip()
+            if len(letter) < MIN_LETTER_LENGTH:
+                raise ValueError(f"слишком короткий ответ ({len(letter)} символов)")
+            return letter
+        except Exception as e:
+            last_error = e
+            print(f"   ⚠️ Попытка {attempt}/{GENERATION_ATTEMPTS} не удалась: {e}")
+    raise last_error
 
 
 def main():
     init_db()
 
-    # Загружаем проанализированные вакансии
-    if not os.path.exists("analyzed_vacancies.json"):
-        print("❌ Файл analyzed_vacancies.json не найден. Сначала запусти hh_analyzer.py")
+    analyzed = try_read_json(ANALYZED_FILE, [])
+    if not isinstance(analyzed, list):
+        print("❌ analyzed_vacancies.json имеет неверный формат. Запусти hh_analyzer.py")
         return
-
-    with open("analyzed_vacancies.json", "r", encoding="utf-8-sig") as f:
-        all_vacancies = json.load(f)
 
     # Отправленные берем из SQLite, а не из устаревшего sent_log.json
     already_sent = get_sent_links()
     manual_links = {item["link"] for item in get_manual_queue()}
 
     # Неотправленные письма прошлого запуска сохраняем
-    pending = [
-        item for item in load_pending_letters()
-        if item["link"] not in already_sent and item["link"] not in manual_links
-    ]
+    pending = select_pending(load_pending_letters(), already_sent, manual_links)
 
-    print(f"📂 Всего вакансий в базе: {len(all_vacancies)}")
+    print(f"📂 Всего вакансий в базе: {len(analyzed)}")
     print(f"📤 Уже отправлено откликов: {len(already_sent)}")
     if pending:
         print(f"📝 Неотправленных писем с прошлого запуска: {len(pending)}")
 
     busy_links = already_sent | manual_links | {item["link"] for item in pending}
-
-    # Фильтруем: топ с оценкой >= 70, исключая уже обработанные
-    top_vacancies = [
-        v for v in all_vacancies
-        if v.get("score", 0) >= 70 and v.get("link") not in busy_links
-    ][:TOP_N]
+    top_vacancies = select_new(analyzed, busy_links)
 
     if not top_vacancies and not pending:
         print("🎉 Нет новых вакансий для генерации писем. Все топовые уже отработаны.")
         return
 
     print(f"🔥 Новых топовых вакансий (70+): {len(top_vacancies)}")
-    print(f"✍️  Генерирую письма...\n")
+    print("✍️  Генерирую письма...\n")
 
     results = list(pending)
+    generated = 0
 
     for i, vacancy in enumerate(top_vacancies, start=1):
-        print(f"[{i}/{len(top_vacancies)}] {vacancy['title']} — {vacancy['company']}")
+        print(f"[{i}/{len(top_vacancies)}] {vacancy.get('title')} — {vacancy.get('company')}")
 
         try:
             letter = generate_letter(vacancy)
             results.append({
-                "title": vacancy["title"],
-                "company": vacancy["company"],
+                "title": vacancy.get("title", ""),
+                "company": vacancy.get("company", ""),
                 "link": vacancy["link"],
-                "score": vacancy["score"],
+                "score": vacancy.get("score", 0),
                 "reason": vacancy.get("reason", ""),
                 "cover_letter": letter,
             })
+            generated += 1
             print(f"   ✅ Письмо готово ({len(letter)} символов)")
         except Exception as e:
             print(f"   ❌ Ошибка: {e}")
 
     # Сохраняем результат, не теряя неотправленные письма прошлых запусков
-    with open(LETTERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(results, f, ensure_ascii=False, indent=4)
+    write_json(COVER_LETTERS_FILE, results)
 
     print(f"\n{'='*50}")
-    print(f"✅ ГОТОВО! Писем в очереди: {len(results)} "
-          f"(новых: {len(results) - len(pending)})")
-    print(f"📁 Файл: {LETTERS_FILE}")
+    print(f"✅ ГОТОВО! Писем в очереди: {len(results)} (новых: {generated})")
+    print(f"📁 Файл: {COVER_LETTERS_FILE.name}")
     print(f"{'='*50}")
 
     if results:
-        print(f"\n📨 ПРИМЕР ПЕРВОГО ПИСЬМА:\n")
-        print(f"Вакансия: {results[0]['title']}")
-        print(f"Компания: {results[0]['company']}")
-        print(f"Оценка: {results[0]['score']}/100")
-        print(f"\n--- ТЕКСТ ПИСЬМА ---\n")
-        print(results[0]["cover_letter"])
-        print(f"\n--- КОНЕЦ ---")
+        print("\n📨 ПРИМЕР ПЕРВОГО ПИСЬМА:\n")
+        print(f"Вакансия: {results[0].get('title')}")
+        print(f"Компания: {results[0].get('company')}")
+        print(f"Оценка: {results[0].get('score')}/100")
+        print("\n--- ТЕКСТ ПИСЬМА ---\n")
+        print(results[0].get("cover_letter", ""))
+        print("\n--- КОНЕЦ ---")
 
 
 if __name__ == "__main__":
