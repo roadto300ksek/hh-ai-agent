@@ -107,9 +107,10 @@ def respond_to_vacancy(page, vacancy):
         add_sent_application(link, title, company, score, status="already")
         return "already"
 
-    # Ищем кнопку
+    # Ищем кнопку "Откликнуться"
     respond_btn = page.locator('[data-qa="vacancy-response-link-top"]').first
     if respond_btn.count() == 0: respond_btn = page.locator('a:has-text("Откликнуться")').first
+    if respond_btn.count() == 0: respond_btn = page.locator('button:has-text("Откликнуться")').first
 
     if respond_btn.count() == 0:
         log(f"   ❌ Кнопка 'Откликнуться' не найдена.")
@@ -125,28 +126,56 @@ def respond_to_vacancy(page, vacancy):
     if check_captcha(page):
         return "captcha"
 
-    # Чат-интерфейс
-    chat_field = page.locator('[data-qa="chatik-textarea"]').first
-    if chat_field.count() == 0: chat_field = page.locator('textarea[placeholder*="сопроводительное"]').first
+    # === НОВЫЙ БЛОК: РАБОТА С ЧАТ-ИНТЕРФЕЙСОМ ===
+    # Ищем кнопку "Добавить сопроводительное" (как на твоем скриншоте)
+    add_letter_btn = page.locator('text="Добавить сопроводительное"').first
+    if add_letter_btn.count() == 0:
+        add_letter_btn = page.locator('button:has-text("Добавить сопроводительное")').first
 
-    if chat_field.count() > 0:
-        log("   💬 Обнаружен чат-интерфейс...")
+    if add_letter_btn.count() > 0 and add_letter_btn.is_visible():
+        log("   💬 Обнаружен чат. Добавляю сопроводительное письмо...")
         try:
-            chat_field.click()
-            page.wait_for_timeout(500)
-            chat_field.fill(letter)
-            send_btn = page.locator('[data-qa="chatik-submit-button"]').first
-            if send_btn.count() == 0: send_btn = page.locator('button[type="submit"]').first
-            if send_btn.count() > 0: send_btn.click()
-        except Exception: pass
+            add_letter_btn.click()
+            page.wait_for_timeout(2000) # Ждем, пока появится поле ввода
+            
+            # Ищем поле ввода (может быть textarea или contenteditable)
+            chat_field = page.locator('textarea[placeholder*="сопроводительное"]').first
+            if chat_field.count() == 0:
+                chat_field = page.locator('textarea[placeholder*="Введите"]').first
+            if chat_field.count() == 0:
+                chat_field = page.locator('textarea').first
 
-        if verify_response_sent(page):
-            log(f"   ✅ ОТКЛИК ОТПРАВЛЕН!")
-            add_sent_application(link, title, company, score, status="sent")
-            return "sent"
-        return "already"
+            if chat_field.count() > 0:
+                chat_field.click()
+                chat_field.fill(letter)
+                log("   ✍️  Письмо вставлено")
+                page.wait_for_timeout(1000)
+                
+                # Ищем кнопку отправки (стрелочка или самолетик)
+                send_btn = page.locator('[data-qa="chatik-submit-button"]').first
+                if send_btn.count() == 0:
+                    send_btn = page.locator('button[type="submit"]').first
+                if send_btn.count() == 0:
+                    # Иногда это просто последняя кнопка с иконкой (svg) внутри формы
+                    send_btn = page.locator('button:has(svg)').last
 
-    # Классический попап
+                if send_btn.count() > 0:
+                    send_btn.click()
+                    page.wait_for_timeout(2000)
+                    log(f"   ✅ ПИСЬМО ОТПРАВЛЕНО В ЧАТ!")
+                else:
+                    log("   ⚠️  Не нашел кнопку отправки в чате (возможно, нужно нажать Enter)")
+                    page.keyboard.press("Enter")
+            else:
+                log("   ⚠️  Не нашел поле ввода для письма в чате.")
+        except Exception as e:
+            log(f"   ⚠️  Ошибка при работе с чатом: {e}")
+            
+        # В чате резюме отправляется автоматически при клике на "Откликнуться"
+        add_sent_application(link, title, company, score, status="sent")
+        return "sent"
+
+    # === КЛАССИЧЕСКИЙ ПОПАП (СТАРЫЙ ИНТЕРФЕЙС) ===
     if check_questions(page):
         log("   ⚠️ Вопросы работодателя. В ручную очередь.")
         add_to_manual_queue(link, title, company, "Требуются ответы на вопросы")
@@ -164,6 +193,7 @@ def respond_to_vacancy(page, vacancy):
         try:
             letter_field.click()
             letter_field.fill(letter)
+            log("   ✍️  Письмо вставлено в попап")
         except Exception: pass
 
     page.wait_for_timeout(1500)
