@@ -809,6 +809,21 @@ def answer_questions(page, vacancy, description="", salary=""):
     return fill_question_answers(page, questions, answers)
 
 
+def response_is_sent(page):
+    """Отклик уже ушёл: виден чат, плашка «Вы откликнулись» или iframe чата."""
+    return verify_response_sent(page) or find_chat_frame(page, timeout_ms=1500) is not None
+
+
+def wait_for_response_marker(page, timeout_sec=15):
+    """Ждёт подтверждения отправки отклика после клика «Откликнуться»."""
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        if response_is_sent(page):
+            return True
+        page.wait_for_timeout(700)
+    return False
+
+
 def respond_to_vacancy(page, vacancy):
     link = vacancy["link"]
     title = vacancy.get("title", "")
@@ -845,9 +860,15 @@ def respond_to_vacancy(page, vacancy):
     if page.locator(CHAT_RESPONSE_BUTTON_QA).count() > 0 or has_visible(
         page, 'a:has-text("Перейти в чат")'
     ):
-        log("   ⏭️  Уже откликались ранее.")
-        add_sent_application(link, title, company, score, status="already")
-        return "already"
+        log("   ⏭️  Уже откликались ранее. Пробую прикрепить письмо...")
+        if letter and send_letter_in_chat(page, letter, title, company):
+            add_sent_application(link, title, company, score, status="sent")
+            remove_from_manual_queue(link)
+            log("   ✅ Письмо прикреплено к ранее отправленному отклику.")
+            return "sent"
+        log("   ⚠️ Отклик уже был, а письмо прикрепить не удалось.")
+        add_to_manual_queue(link, title, company, "Уже откликался, письмо не прикрепилось")
+        return "chat_failed"
 
     # --- ИЩЕМ КНОПКУ "ОТКЛИКНУТЬСЯ" ---
     respond_btn = page.locator('[data-qa="vacancy-response-link-top"]').first
@@ -862,7 +883,9 @@ def respond_to_vacancy(page, vacancy):
 
     try:
         respond_btn.click()
-    except Exception:
+    except Exception as e:
+        log(f"   ❌ Не удалось нажать «Откликнуться»: {e}")
+        take_screenshot(page, "respond_click_error")
         return "click_error"
 
     page.wait_for_timeout(random.randint(4000, 6000))
@@ -926,10 +949,7 @@ def respond_to_vacancy(page, vacancy):
             add_to_manual_queue(link, title, company, "Ошибка отправки отклика")
             return "send_error"
 
-        if not (
-            verify_response_sent(page)
-            or page.locator(CHAT_RESPONSE_BUTTON_QA).count() > 0
-        ):
+        if not wait_for_response_marker(page, timeout_sec=10):
             log("   ⚠️ Нет подтверждения, что отклик ушёл. В ручную очередь.")
             add_to_manual_queue(link, title, company, "Нет подтверждения отправки отклика")
             return "no_submit"
@@ -939,11 +959,8 @@ def respond_to_vacancy(page, vacancy):
         return "sent"
 
     # --- НОВЫЙ ИНТЕРФЕЙС: отклик уходит сразу, письмо добавляется в чате ---
-    if (
-        page.locator(CHAT_RESPONSE_BUTTON_QA).count() > 0
-        or has_visible(page, 'text=Вы откликнулись')
-        or find_chat_frame(page, timeout_ms=2000)
-    ):
+    log("   ⏳ Жду подтверждения отклика...")
+    if wait_for_response_marker(page):
         log("   💬 Отклик отправлен. Прикрепляю письмо в чате...")
         if send_letter_in_chat(page, letter, title, company):
             add_sent_application(link, title, company, score, status="sent")
@@ -956,6 +973,9 @@ def respond_to_vacancy(page, vacancy):
         )
         return "chat_failed"
 
+    log("   ❌ Не удалось подтвердить отправку отклика.")
+    take_screenshot(page, "response_not_confirmed")
+    add_to_manual_queue(link, title, company, "Не удалось подтвердить отправку отклика")
     return "no_submit"
 
 
