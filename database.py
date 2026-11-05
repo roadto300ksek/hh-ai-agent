@@ -114,3 +114,21 @@ def add_to_manual_queue(link, title, company, reason, db_path=DB_PATH):
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(link) DO NOTHING
         ''', (link, title, company, reason, datetime.now().isoformat()))
+
+
+def remove_from_manual_queue(link, db_path=DB_PATH):
+    """Убирает вакансию из ручной очереди после успешного исправления."""
+    with get_conn(db_path) as conn:
+        conn.execute("DELETE FROM manual_queue WHERE link = ?", (link,))
+
+
+def get_no_letter_links(db_path=DB_PATH, day=None):
+    """Ссылки откликов, у которых отклик ушёл, а письмо не подтвердилось."""
+    query = "SELECT link FROM sent_applications WHERE status = 'no_letter'"
+    params = []
+    if day:
+        query += " AND sent_at LIKE ?"
+        params.append(f"{day}%")
+    with get_conn(db_path) as conn:
+        cursor = conn.execute(query, params)
+        return {row[0] for row in cursor.fetchall()}

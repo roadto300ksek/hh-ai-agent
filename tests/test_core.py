@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -161,6 +162,28 @@ class TestDatabase(unittest.TestCase):
         database.add_to_manual_queue("a", "t", "c", "reason", db_path=self.db)
         database.add_to_manual_queue("a", "t", "c", "reason", db_path=self.db)
         self.assertEqual(len(database.get_manual_queue(self.db)), 1)
+
+    def test_manual_queue_item_can_be_removed(self):
+        database.add_to_manual_queue("a", "t", "c", "reason", db_path=self.db)
+        database.add_to_manual_queue("b", "t", "c", "reason", db_path=self.db)
+        database.remove_from_manual_queue("a", db_path=self.db)
+        self.assertEqual(
+            [item["link"] for item in database.get_manual_queue(self.db)],
+            ["b"],
+        )
+
+    def test_no_letter_links_filter_by_status_and_day(self):
+        database.add_sent_application("a", "t", "c", 90, status="no_letter", db_path=self.db)
+        database.add_sent_application("b", "t", "c", 80, status="sent", db_path=self.db)
+        database.add_sent_application("c", "t", "c", 70, status="no_letter", db_path=self.db)
+        day = datetime.now().strftime("%Y-%m-%d")
+        self.assertEqual(database.get_no_letter_links(self.db, day=day), {"a", "c"})
+        self.assertEqual(database.get_no_letter_links(self.db, day="1999-01-01"), set())
+
+    def test_no_letter_is_removed_from_retry_after_upgrade(self):
+        database.add_sent_application("a", "t", "c", 90, status="no_letter", db_path=self.db)
+        database.add_sent_application("a", "t", "c", 90, status="sent", db_path=self.db)
+        self.assertEqual(database.get_no_letter_links(self.db), set())
 
 
 class TestUtils(unittest.TestCase):
