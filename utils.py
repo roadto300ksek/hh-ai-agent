@@ -6,8 +6,12 @@ from datetime import datetime
 from pathlib import Path
 
 
-def configure_stdout(line_buffering=False):
-    """UTF-8 в консоли: иначе Windows падает на emoji при перенаправлении вывода."""
+def configure_stdout(line_buffering=True):
+    """UTF-8 в консоли: иначе Windows падает на emoji при перенаправлении вывода.
+
+    line_buffering=True важен для дашборда: иначе вывод копится в буфере
+    и лог обновляется пачками раз в несколько минут.
+    """
     try:
         sys.stdout.reconfigure(
             encoding="utf-8", errors="replace", line_buffering=line_buffering
@@ -77,3 +81,11 @@ def has_visible(page, selector, limit=5):
     except Exception:
         pass
     return False
+
+
+def page_is_closed(page):
+    """True, если пользователь закрыл окно/страницу браузера."""
+    try:
+        return page.is_closed()
+    except Exception:
+        return True

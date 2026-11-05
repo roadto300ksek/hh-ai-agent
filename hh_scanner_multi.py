@@ -3,11 +3,11 @@ import random
 import sys
 import time
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Error as PlaywrightError, sync_playwright
 
 from hh_browser import launch_context
 from paths import VACANCIES_FILE
-from utils import configure_stdout, try_read_json, write_json
+from utils import configure_stdout, page_is_closed, try_read_json, write_json
 
 configure_stdout()
 
@@ -116,6 +116,8 @@ def navigate(page, url):
             page.wait_for_timeout(random.randint(4000, 7000))
             return True
         except Exception as e:
+            if page_is_closed(page):
+                raise
             print(f"   ⚠️ Попытка {attempt}/{NAVIGATION_ATTEMPTS} не удалась: {e}")
             if attempt < NAVIGATION_ATTEMPTS:
                 time.sleep(3)
@@ -190,6 +192,14 @@ def scrape_query(page, query, page_num=0):
     return vacancies
 
 
+def stop_if_page_closed(page):
+    """Закрытый браузер — это остановка пользователем, а не сбой селекторов."""
+    if page_is_closed(page):
+        print("\n🛑 Окно браузера закрыто. Сбор вакансий остановлен.")
+        print(f"📁 Старый {VACANCIES_FILE.name} сохранен.")
+        raise SystemExit(1)
+
+
 def scrape_hh():
     all_vacancies = {}
 
@@ -205,11 +215,13 @@ def scrape_hh():
             total_queries = len(SEARCH_QUERIES)
 
             for idx, query in enumerate(SEARCH_QUERIES, start=1):
+                stop_if_page_closed(page)
                 print(f"\n{'='*50}")
                 print(f"📊 Запрос {idx}/{total_queries}")
                 print(f"{'='*50}")
 
                 for page_num in range(SEARCH_PAGES):
+                    stop_if_page_closed(page)
                     vacancies = scrape_query(page, query, page_num)
 
                     new_count = 0
@@ -229,8 +241,16 @@ def scrape_hh():
 
                 if idx < total_queries:
                     human_delay(MIN_DELAY_BETWEEN_QUERIES, MAX_DELAY_BETWEEN_QUERIES)
+        except PlaywrightError as e:
+            print("\n🛑 Браузер закрыт или недоступен. Сбор вакансий остановлен.")
+            print(f"   Причина: {e}")
+            print(f"📁 Старый {VACANCIES_FILE.name} сохранен.")
+            raise SystemExit(1)
         finally:
-            browser.close()
+            try:
+                browser.close()
+            except Exception:
+                pass
 
     final_list = list(all_vacancies.values())
 

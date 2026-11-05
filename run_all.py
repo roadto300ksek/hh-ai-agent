@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 import time
@@ -35,9 +36,10 @@ def run_step(script_name, description, required_file=None):
     started = time.time()
     try:
         subprocess.run(
-            [sys.executable, str(BASE_DIR / script_name)],
+            [sys.executable, "-u", str(BASE_DIR / script_name)],
             check=True,
             cwd=str(BASE_DIR),
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
         )
     except subprocess.CalledProcessError:
         print(f"\n❌ ОШИБКА при выполнении {script_name}.")

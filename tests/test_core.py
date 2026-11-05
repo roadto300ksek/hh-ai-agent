@@ -9,7 +9,7 @@ from hh_analyzer import normalize_scores, parse_llm_response
 from hh_executor import build_queue
 from hh_scanner_multi import build_search_url, normalize_link
 from hh_writer import normalize_letters, select_new, select_pending
-from utils import clamp, read_json, write_json
+from utils import clamp, page_is_closed, read_json, write_json
 
 
 class TestAnalyzerParsing(unittest.TestCase):
@@ -164,6 +164,23 @@ class TestUtils(unittest.TestCase):
             write_json(path, {"ключ": "значение"})
             self.assertEqual(read_json(path), {"ключ": "значение"})
             self.assertFalse(path.with_suffix(".json.tmp").exists())
+
+    def test_page_is_closed(self):
+        class OpenPage:
+            def is_closed(self):
+                return False
+
+        class ClosedPage:
+            def is_closed(self):
+                return True
+
+        class BrokenPage:
+            def is_closed(self):
+                raise RuntimeError("target closed")
+
+        self.assertFalse(page_is_closed(OpenPage()))
+        self.assertTrue(page_is_closed(ClosedPage()))
+        self.assertTrue(page_is_closed(BrokenPage()))
 
 
 if __name__ == "__main__":

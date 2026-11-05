@@ -1,4 +1,5 @@
 import random
+import sys
 import time
 from datetime import datetime
 
@@ -13,7 +14,7 @@ from database import (
 )
 from hh_browser import launch_context
 from paths import COVER_LETTERS_FILE, SCREENSHOT_DIR
-from utils import configure_stdout, has_visible, log, try_read_json
+from utils import configure_stdout, has_visible, log, page_is_closed, try_read_json
 
 configure_stdout(line_buffering=True)
 
@@ -60,10 +61,14 @@ def check_captcha(page):
 
 
 def check_auth_on_main(page):
-    """Возвращает 'ok', 'captcha' или 'no'."""
+    """Возвращает 'ok', 'captcha' или 'no'.
+
+    Маркеры обновлены под новую вёрстку hh.ru: старые
+    mainmenu_applicantProfile / mainmenu_myResumes больше не встречаются.
+    """
     try:
         page.goto("https://hh.ru", wait_until="domcontentloaded")
-        page.wait_for_timeout(5000)
+        page.wait_for_timeout(8000)
     except Exception:
         return "no"
 
@@ -71,15 +76,17 @@ def check_auth_on_main(page):
         return "captcha"
 
     auth_markers = [
-        '[data-qa="mainmenu_applicantProfile"]',
-        '[data-qa="mainmenu_myResumes"]',
-        'a[href="/applicant/resumes"]',
-        '[data-qa="account-menu-button"]',
+        '[data-qa="mainmenu_profileAndResumes"]',
+        '[data-qa="mainmenu_applicantProfilePage"]',
+        '[data-qa="mainmenu_applicantProfileDesktopDrop"]',
+        'a[href*="/applicant/profile/me"]',
+        'a[href*="/applicant/negotiations"]',
+        'a[href*="/applicant/resumes"]',
     ]
     for marker in auth_markers:
         if has_visible(page, marker):
             return "ok"
-    if has_visible(page, 'text=Мои резюме'):
+    if has_visible(page, "text=Резюме и профиль") or has_visible(page, "text=Мои резюме"):
         return "ok"
     return "no"
 
@@ -300,10 +307,10 @@ def main():
     cover_letters = try_read_json(COVER_LETTERS_FILE, None)
     if cover_letters is None:
         print("❌ Файл cover_letters.json не найден или поврежден.")
-        return
+        sys.exit(1)
     if not isinstance(cover_letters, list):
         print("❌ cover_letters.json имеет неверный формат.")
-        return
+        sys.exit(1)
 
     already_sent = get_sent_links()
     sent_today = get_today_sent_count()
@@ -328,7 +335,7 @@ def main():
             browser, context = launch_context(p, headless=HEADLESS)
         except FileNotFoundError as e:
             log(f"🛑 {e}")
-            return
+            sys.exit(1)
 
         try:
             page = context.new_page()
@@ -337,20 +344,30 @@ def main():
             auth = check_auth_on_main(page)
             if auth == "captcha":
                 log("🛑 Капча на главной. Реши её вручную и запусти снова.")
-                return
+                sys.exit(1)
             if auth != "ok":
+                if page_is_closed(page):
+                    log("🛑 Браузер закрыт. Останавливаюсь.")
+                    sys.exit(1)
                 log("🛑 Не удалось подтвердить авторизацию. Запусти hh_login.py.")
-                return
+                sys.exit(1)
 
             sent_count = 0
             consecutive_errors = 0
 
             for i, vacancy in enumerate(to_send, start=1):
+                if page_is_closed(page):
+                    log("🛑 Браузер закрыт. Останавливаюсь.")
+                    sys.exit(1)
+
                 log(f"\n{'='*60}\n📨 [{i}/{len(to_send)}] {vacancy.get('title')} - {vacancy.get('company')}\n{'='*60}")
 
                 try:
                     result = respond_to_vacancy(page, vacancy)
                 except Exception as e:
+                    if page_is_closed(page) or "has been closed" in str(e).lower():
+                        log("🛑 Браузер закрыт. Останавливаюсь.")
+                        sys.exit(1)
                     log(f"   ❌ Исключение: {e}")
                     result = "exception"
 
@@ -375,6 +392,7 @@ def main():
 
         except KeyboardInterrupt:
             log("\n🛑 СТОП по команде пользователя (Ctrl+C).")
+            sys.exit(130)
         finally:
             try:
                 browser.close()
