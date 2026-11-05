@@ -893,6 +893,17 @@ def respond_to_vacancy(page, vacancy):
     if check_captcha(page):
         return "captcha"
 
+    # Форма отклика или анкета может подгружаться чуть дольше после клика.
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if (
+            check_questions(page)
+            or page.locator(RESPONSE_LETTER_QA).count() > 0
+            or response_is_sent(page)
+        ):
+            break
+        page.wait_for_timeout(500)
+
     # --- ВОПРОСЫ РАБОТОДАТЕЛЯ ---
     if check_questions(page):
         log("   📝 Есть вопросы работодателя. Отвечаю автоматически...")
