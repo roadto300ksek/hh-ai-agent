@@ -40,6 +40,7 @@ CHAT_FRAME_URL = "chatik.hh.ru"
 CHAT_ADD_LETTER_QA = '[data-qa="chatik-chat-message-applicant-action"]'
 CHAT_TEXTAREA_QA = '[data-qa="text-input"]'
 CHAT_SEND_QA = '[data-qa="chatik-do-send-message"]'
+CHAT_PREVIEW_QA = '[data-qa="chat-input-preview"]'
 CHAT_RESPONSE_BUTTON_QA = '[data-qa="vacancy-response-link-view-topic"]'
 NO_LETTER_TEXT = "Без сопроводительного письма"
 
@@ -200,6 +201,19 @@ def open_chat(page):
     return None
 
 
+def letter_composer_is_open(frame):
+    """Открыта ли карточка «Сопроводительное письмо» над полем ввода."""
+    try:
+        preview = frame.locator(CHAT_PREVIEW_QA)
+        for i in range(min(preview.count(), 5)):
+            item = preview.nth(i)
+            if item.is_visible() and "Сопроводительное письмо" in item.inner_text():
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def chat_letter_state(frame, letter):
     """Что видно в чате: текст письма, плашка «Без письма», кнопка добавления."""
     try:
@@ -262,10 +276,13 @@ def send_letter_in_chat(page, letter, title="", company=""):
     try:
         add_btn = frame.locator(CHAT_ADD_LETTER_QA).first
         if add_btn.count() > 0 and add_btn.is_visible():
-            log("   🖱️ Нажимаю «Добавить сопроводительное»...")
-            add_btn.click()
-            page.wait_for_timeout(2000)
-            frame = find_chat_frame(page, timeout_ms=3000) or frame
+            if letter_composer_is_open(frame):
+                log("   ✍️ Поле сопроводительного письма уже открыто.")
+            else:
+                log("   🖱️ Нажимаю «Добавить сопроводительное»...")
+                add_btn.click()
+                page.wait_for_timeout(2000)
+                frame = find_chat_frame(page, timeout_ms=3000) or frame
         else:
             log("   ⚠️ Кнопка «Добавить сопроводительное» не видна, пробую поле ввода.")
 
