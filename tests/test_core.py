@@ -6,6 +6,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import database
+from config import CANDIDATE_ANSWERS
 from hh_analyzer import normalize_scores, parse_llm_response
 from hh_executor import (
     build_queue,
@@ -231,8 +232,8 @@ class TestQuestionAnswers(unittest.TestCase):
             ],
             allow_fallback=True,
         )
-        self.assertIn("@username", answers[0])
-        self.assertIn("<МИНИМУМ>", answers[1])
+        self.assertIn(CANDIDATE_ANSWERS["telegram"], answers[0])
+        self.assertIn(CANDIDATE_ANSWERS["salary_min"], answers[1])
         self.assertEqual(answers[2], "ТК")
 
     def test_validate_checkbox_list(self):

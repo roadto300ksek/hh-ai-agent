@@ -23,7 +23,7 @@ CANDIDATE_PROFILE = """
 
 ГЕОГРАФИЯ И ФОРМАТ РАБОТЫ:
 - Идеально: удалённая работа.
-- Хорошо: гибрид или офис в <ГОРОД>е.
+- Хорошо: гибрид или офис в <ГОРОД>.
 - Плохо: офис/гибрид в других городах без возможности удалёнки.
 
 ВАЖНО (УРОВЕНЬ ОПЫТА):
@@ -40,7 +40,7 @@ CANDIDATE_PROFILE = """
 CANDIDATE_INFO = """
 Имя: <ИМЯ>
 Город: <ГОРОД>
-Формат работы: удалёнка (приоритет) или гибрид/офис в <ГОРОД>е
+Формат работы: удалёнка (приоритет) или гибрид/офис в <ГОРОД>
 Резюме: Python-разработчик, специализация — автоматизация бизнес-процессов и AI-агенты.
 
 Опыт и навыки:
@@ -65,18 +65,15 @@ CANDIDATE_INFO = """
 CANDIDATE_ANSWERS = {
     "city": "<ГОРОД>",
     "citizenship": "Россия",
-    "education": (
-        "неоконченное высшее, <ГОРОД>ий государственный университет "
-        "университет (2012), русский язык и литература"
-    ),
+    "education": "<ОБРАЗОВАНИЕ>",
     "it_experience": "коммерческого опыта в IT нет, только пет-проекты и фриланс",
-    "total_experience": "общий стаж в резюме <ОПЫТ>, но он не в IT",
-    "employment_format": "на предыдущих местах были и ТК, и ГПХ",
+    "total_experience": "<ОПЫТ>",
+    "employment_format": "<ФОРМАТ ТРУДОУСТРОЙСТВА>",
     "salary_min": "<МИНИМУМ>",
     "salary_comfort": "<КОМФОРТ>",
     "salary_note": (
         "если в вакансии указана вилка — ориентироваться на неё; "
-        "если вилка не указана — минимум <МИНИМУМ>, комфорт <КОМФОРТ>"
+        "если вилка не указана — <МИНИМУМ> / <КОМФОРТ>"
     ),
     "work_format": "только удалёнка",
     "relocation": "переезд в другой город не рассматриваю",
@@ -89,17 +86,31 @@ CANDIDATE_ANSWERS = {
     "phone": "+7 000 000-00-00",
     "email": "email@example.com",
     "github": "https://github.com/username",
-    "portfolio": (
-        "Telegram-бот для изучения языков и мультиагентная система "
-        "поиска работы на hh.ru"
-    ),
-    "criminal_record": "судимости нет",
-    "driver_license": "водительские права есть",
+    "portfolio": "ваши проекты",
+    "criminal_record": "<СУДИМОСТЬ>",
+    "driver_license": "<ПРАВА>",
     "consent": (
         "на согласия об обработке персональных данных и подобные "
         "юридические подтверждения — всегда «Да»"
     ),
 }
+
+# Личные данные подтягиваются из candidate_local.py, если он создан.
+# Этот файл в .gitignore и не попадает в GitHub.
+try:
+    import candidate_local
+except ImportError:
+    candidate_local = None
+
+if candidate_local is not None:
+    CANDIDATE_PROFILE = getattr(
+        candidate_local, "CANDIDATE_PROFILE", CANDIDATE_PROFILE
+    )
+    CANDIDATE_INFO = getattr(candidate_local, "CANDIDATE_INFO", CANDIDATE_INFO)
+    CANDIDATE_ANSWERS = {
+        **CANDIDATE_ANSWERS,
+        **getattr(candidate_local, "CANDIDATE_ANSWERS", {}),
+    }
 
 CANDIDATE_ANSWER_RULES = f"""
 ФАКТЫ ДЛЯ АНКЕТ:

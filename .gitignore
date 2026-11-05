@@ -2,6 +2,9 @@
 hh_state.json
 .env
 
+# Личные данные кандидата
+candidate_local.py
+
 # Рабочие данные (генерируются скриптами)
 vacancies.json
 analyzed_vacancies.json

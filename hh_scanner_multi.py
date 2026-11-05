@@ -26,7 +26,7 @@ NAVIGATION_ATTEMPTS = 2
 # Фильтры на стороне hh.ru: не тратим токены LLM на заведомо неподходящее.
 # area=113 — вся Россия. id города можно посмотреть в URL поиска на hh.ru.
 # experience: noExperience,between1And3 — junior/стажёр и до 3 лет.
-# schedule=remote — удалёнка (убери, если нужны офис и гибрид в <ГОРОД>е).
+# schedule=remote — удалёнка (убери, если нужны офис и гибрид в вашем городе).
 SEARCH_FILTERS = {
     "area": "113",
     "experience": "noExperience,between1And3",
