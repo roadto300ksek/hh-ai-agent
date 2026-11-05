@@ -60,12 +60,16 @@ def get_sent_links(db_path=DB_PATH):
 
 
 def get_today_sent_count(db_path=DB_PATH):
-    """Сколько откликов реально отправлено сегодня (для дневного лимита)."""
+    """Сколько откликов реально отправлено сегодня (для дневного лимита).
+
+    'no_letter' — отклик ушёл, но письмо прикрепить не удалось. Это всё равно
+    потраченный отклик, поэтому он тоже считается в дневном лимите.
+    """
     day = datetime.now().strftime("%Y-%m-%d")
     with get_conn(db_path) as conn:
         cursor = conn.execute(
             "SELECT COUNT(*) FROM sent_applications "
-            "WHERE status = 'sent' AND sent_at LIKE ?",
+            "WHERE status IN ('sent', 'no_letter') AND sent_at LIKE ?",
             (f"{day}%",),
         )
         return cursor.fetchone()[0]

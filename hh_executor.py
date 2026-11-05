@@ -34,6 +34,15 @@ SEND_ERROR_MARKERS = [
     'text=Отклик не отправлен',
 ]
 
+# Новый интерфейс hh.ru: чат отклика открывается в iframe chatik.hh.ru,
+# а сопроводительное письмо добавляется уже после отправки отклика.
+CHAT_FRAME_URL = "chatik.hh.ru"
+CHAT_ADD_LETTER_QA = '[data-qa="chatik-chat-message-applicant-action"]'
+CHAT_TEXTAREA_QA = '[data-qa="text-input"]'
+CHAT_SEND_QA = '[data-qa="chatik-do-send-message"]'
+CHAT_RESPONSE_BUTTON_QA = '[data-qa="vacancy-response-link-view-topic"]'
+NO_LETTER_TEXT = "Без сопроводительного письма"
+
 ERROR_RESULTS = {
     "no_button",
     "no_submit",
@@ -118,50 +127,222 @@ def take_screenshot(page, prefix):
         pass
 
 
-def send_letter_in_chat(page, letter):
-    """Отправляет письмо в чате и проверяет, что hh.ru не показал ошибку."""
-    log("   💬 Пытаюсь отправить письмо в чате...")
+def normalize_text(text):
+    """Схлопывает пробелы и переводы строк для сравнения текста письма."""
+    return " ".join((text or "").split())
+
+
+def count_visible(container, selector, limit=5):
+    """Сколько видимых элементов найдено внутри page/frame."""
     try:
-        add_btn = page.locator('text=Добавить сопроводительное').first
+        locator = container.locator(selector)
+        return sum(
+            1 for i in range(min(locator.count(), limit)) if locator.nth(i).is_visible()
+        )
+    except Exception:
+        return 0
+
+
+def find_chat_frame(page, timeout_ms=20000):
+    """Ждёт загрузки iframe чата hh.ru и возвращает его."""
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        if page_is_closed(page):
+            return None
+        try:
+            frames = list(page.frames)
+        except Exception:
+            return None
+        for frame in frames:
+            if CHAT_FRAME_URL not in (frame.url or ""):
+                continue
+            try:
+                if frame.locator(f"{CHAT_TEXTAREA_QA}, {CHAT_ADD_LETTER_QA}").count() > 0:
+                    return frame
+            except Exception:
+                continue
+        try:
+            page.wait_for_timeout(500)
+        except Exception:
+            return None
+    return None
+
+
+def open_chat(page):
+    """Открывает чат отклика. В новом интерфейсе это кнопка «Чат»."""
+    frame = find_chat_frame(page, timeout_ms=2000)
+    if frame:
+        return frame
+
+    selectors = (
+        CHAT_RESPONSE_BUTTON_QA,
+        'a:has-text("Перейти в чат")',
+        'button:text-is("Чат")',
+        'a:text-is("Чат")',
+    )
+    for selector in selectors:
+        try:
+            locator = page.locator(selector)
+            count = locator.count()
+        except Exception:
+            continue
+        for i in range(min(count, 5)):
+            try:
+                item = locator.nth(i)
+                if not item.is_visible():
+                    continue
+                item.click()
+            except Exception:
+                continue
+            frame = find_chat_frame(page)
+            if frame:
+                return frame
+    return None
+
+
+def chat_letter_state(frame, letter):
+    """Что видно в чате: текст письма, плашка «Без письма», кнопка добавления."""
+    try:
+        body = normalize_text(frame.locator("body").inner_text())
+    except Exception:
+        return None
+
+    snippet = normalize_text(letter)[:50]
+    return {
+        "snippet": bool(snippet) and snippet in body,
+        "no_letter": NO_LETTER_TEXT in body,
+        "add_button": count_visible(frame, CHAT_ADD_LETTER_QA),
+    }
+
+
+def chat_matches_vacancy(frame, title, company):
+    """Проверяет, что открыт чат именно этой вакансии, а не предыдущей."""
+    try:
+        body = normalize_title(frame.locator("body").inner_text())
+    except Exception:
+        return False
+
+    if title and normalize_title(title) in body:
+        return True
+    if company and normalize_title(company) in body:
+        return True
+    return False
+
+
+def send_letter_in_chat(page, letter, title="", company=""):
+    """Прикрепляет сопроводительное письмо к уже отправленному отклику.
+
+    Работает внутри iframe chatik.hh.ru. Возвращает True только после того,
+    как текст письма появился в переписке (или исчезла плашка «Без письма»).
+    """
+    log("   💬 Открываю чат отклика...")
+    frame = open_chat(page)
+    if frame is None:
+        log("   ❌ Чат hh.ru не открылся.")
+        take_screenshot(page, "chat_not_opened")
+        return False
+
+    if (title or company) and not chat_matches_vacancy(frame, title, company):
+        page.wait_for_timeout(1500)
+        frame = find_chat_frame(page, timeout_ms=1000) or frame
+        if not chat_matches_vacancy(frame, title, company):
+            log("   ❌ Открылся чат другой вакансии. Письмо не отправляю.")
+            take_screenshot(page, "chat_wrong_vacancy")
+            return False
+
+    before = chat_letter_state(frame, letter) or {
+        "snippet": False,
+        "no_letter": False,
+        "add_button": 0,
+    }
+    if before["snippet"]:
+        log("   ✅ Письмо уже прикреплено к отклику.")
+        return True
+
+    try:
+        add_btn = frame.locator(CHAT_ADD_LETTER_QA).first
         if add_btn.count() > 0 and add_btn.is_visible():
-            log("   🖱️ Нажимаю 'Добавить сопроводительное'...")
+            log("   🖱️ Нажимаю «Добавить сопроводительное»...")
             add_btn.click()
-            page.wait_for_timeout(2500)
+            page.wait_for_timeout(2000)
+            frame = find_chat_frame(page, timeout_ms=3000) or frame
+        else:
+            log("   ⚠️ Кнопка «Добавить сопроводительное» не видна, пробую поле ввода.")
 
-        chat_input = page.locator('textarea').first
-        if chat_input.count() == 0:
-            chat_input = page.locator('div[contenteditable="true"]').first
-        if chat_input.count() == 0:
-            chat_input = page.locator('[data-qa="chatik-textarea"]').first
-
-        if chat_input.count() == 0:
-            log("   ❌ Не нашел поле ввода в чате.")
+        textarea = frame.locator(CHAT_TEXTAREA_QA).first
+        if textarea.count() == 0 or not textarea.is_visible():
+            log("   ❌ Не нашёл поле ввода письма в чате.")
             take_screenshot(page, "chat_no_input")
             return False
 
-        log("   ⌨️ Ввожу текст...")
-        chat_input.click()
-        page.wait_for_timeout(500)
-        chat_input.fill("")
-        page.wait_for_timeout(200)
-        chat_input.fill(letter)
+        log("   ⌨️ Ввожу текст письма...")
+        textarea.click()
+        page.wait_for_timeout(300)
+        textarea.fill(letter)
         page.wait_for_timeout(1000)
 
-        # Отправляем по Enter (работает в 99% чатов hh)
-        page.keyboard.press("Enter")
-        page.wait_for_timeout(2000)
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            send_btn = frame.locator(CHAT_SEND_QA).first
+            if send_btn.count() > 0 and send_btn.is_visible():
+                break
+            page.wait_for_timeout(300)
+            frame = find_chat_frame(page, timeout_ms=500) or frame
+        else:
+            send_btn = frame.locator(CHAT_SEND_QA).first
 
-        if check_send_error(page):
-            log("   ❌ hh.ru сообщил об ошибке отправки в чате.")
-            take_screenshot(page, "chat_send_error")
+        if send_btn.count() == 0 or not send_btn.is_visible():
+            log("   ❌ Кнопка отправки письма не появилась.")
+            take_screenshot(page, "chat_no_send_button")
             return False
 
-        log("   ✅ Письмо отправлено в чат.")
-        return True
+        send_btn.click()
+        log("   📤 Письмо отправлено, проверяю, что оно прикрепилось...")
+        page.wait_for_timeout(2500)
+
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline:
+            frame = find_chat_frame(page, timeout_ms=500) or frame
+            after = chat_letter_state(frame, letter)
+            if after is None:
+                page.wait_for_timeout(700)
+                continue
+            if after["snippet"]:
+                log("   ✅ Письмо прикреплено к отклику.")
+                return True
+            if (
+                not after["no_letter"]
+                and after["add_button"] == 0
+                and (before["no_letter"] or before["add_button"] > 0)
+            ):
+                log("   ✅ Письмо прикреплено к отклику.")
+                return True
+            page.wait_for_timeout(700)
+
+        log("   ❌ Не удалось подтвердить, что письмо прикрепилось.")
+        take_screenshot(page, "chat_not_confirmed")
+        return False
     except Exception as e:
-        log(f"   ⚠️ Ошибка в чате: {e}")
+        log(f"   ⚠️ Ошибка при отправке письма в чате: {e}")
         take_screenshot(page, "chat_exception")
         return False
+
+
+def normalize_title(title):
+    """Убирает различия в тире/пунктуации, чтобы сравнить название вакансии."""
+    text = normalize_text(title).lower()
+    return "".join(ch for ch in text if ch.isalnum() or ch == " ").strip()
+
+
+def get_live_vacancy_title(page):
+    for selector in ('[data-qa="vacancy-title"]', "h1"):
+        try:
+            locator = page.locator(selector).first
+            if locator.count() > 0 and locator.is_visible():
+                return locator.inner_text().strip()
+        except Exception:
+            continue
+    return ""
 
 
 def respond_to_vacancy(page, vacancy):
@@ -184,17 +365,19 @@ def respond_to_vacancy(page, vacancy):
         add_sent_application(link, title, company, score, status="archived")
         return "archived"
 
-    # --- ПРОВЕРКА 1: МЫ УЖЕ В ЧАТЕ? (например, ты зашел вручную) ---
-    if has_visible(page, 'text=Добавить сопроводительное') or has_visible(page, 'div[contenteditable="true"]'):
-        log("   💬 Обнаружен интерфейс чата.")
-        if send_letter_in_chat(page, letter):
-            add_sent_application(link, title, company, score, status="sent")
-            return "sent"
-        add_to_manual_queue(link, title, company, "Не удалось отправить письмо в чате")
-        return "chat_failed"
+    # Защита от письма не под ту вакансию: название на hh.ru могло измениться
+    # после сканирования (реальный случай: 139082046).
+    live_title = get_live_vacancy_title(page)
+    if live_title and title and normalize_title(live_title) != normalize_title(title):
+        log(f"   ⚠️ На hh.ru вакансия называется «{live_title}», а письмо — под «{title}».")
+        log("   ⏭️  Пропускаю, чтобы не отправить письмо не под ту вакансию.")
+        add_to_manual_queue(link, live_title, company, "Название вакансии изменилось")
+        return "title_mismatch"
 
-    # --- ПРОВЕРКА 2: МЫ УЖЕ ОТКЛИКАЛИСЬ РАНЕЕ? ---
-    if has_visible(page, 'a:has-text("Перейти в чат")') or has_visible(page, 'text=Вы откликнулись'):
+    # --- МЫ УЖЕ ОТКЛИКАЛИСЬ РАНЕЕ? ---
+    if page.locator(CHAT_RESPONSE_BUTTON_QA).count() > 0 or has_visible(
+        page, 'a:has-text("Перейти в чат")'
+    ):
         log("   ⏭️  Уже откликались ранее.")
         add_sent_application(link, title, company, score, status="already")
         return "already"
@@ -220,22 +403,13 @@ def respond_to_vacancy(page, vacancy):
     if check_captcha(page):
         return "captcha"
 
-    # --- ПОСЛЕ КЛИКА: ЕСЛИ ОТКРЫЛСЯ ЧАТ ---
-    if has_visible(page, 'text=Добавить сопроводительное') or has_visible(page, 'div[contenteditable="true"]'):
-        log("   💬 Клик открыл чат. Отправляю письмо...")
-        if send_letter_in_chat(page, letter):
-            add_sent_application(link, title, company, score, status="sent")
-            return "sent"
-        add_to_manual_queue(link, title, company, "Не удалось отправить письмо в чате")
-        return "chat_failed"
-
-    # --- КЛАССИЧЕСКИЙ ПОПАП ---
-    log("   📋 Классический попап. Ищу поле для письма...")
+    # --- ВОПРОСЫ РАБОТОДАТЕЛЯ ---
     if check_questions(page):
         log("   ⚠️ Вопросы работодателя. В ручную очередь.")
         add_to_manual_queue(link, title, company, "Требуются ответы на вопросы")
         return "manual_questions"
 
+    # --- КЛАССИЧЕСКИЙ ПОПАП С ПОЛЕМ ПИСЬМА ---
     letter_field = page.locator('[data-qa="vacancy-response-popup-form-letter-input"]').first
     if letter_field.count() == 0:
         toggle_btn = page.locator('[data-qa="vacancy-response-letter-toggle"]').first
@@ -245,20 +419,27 @@ def respond_to_vacancy(page, vacancy):
             letter_field = page.locator('[data-qa="vacancy-response-popup-form-letter-input"]').first
 
     if letter_field.count() > 0:
+        log("   📋 Классический попап. Вставляю письмо...")
         try:
             letter_field.click()
             letter_field.fill(letter)
             log("   ✍️  Письмо вставлено в попап")
-        except Exception:
-            pass
+        except Exception as e:
+            log(f"   ❌ Не удалось вставить письмо: {e}")
+            add_to_manual_queue(link, title, company, "Не удалось заполнить письмо в попапе")
+            return "send_error"
 
-    page.wait_for_timeout(1500)
+        page.wait_for_timeout(1000)
 
-    submit_btn = page.locator('[data-qa="vacancy-response-submit-popup"]').first
-    if submit_btn.count() == 0:
-        submit_btn = page.locator('button:has-text("Отправить")').first
+        submit_btn = page.locator('[data-qa="vacancy-response-submit-popup"]').first
+        if submit_btn.count() == 0:
+            submit_btn = page.locator('button:has-text("Отправить")').first
 
-    if submit_btn.count() > 0:
+        if submit_btn.count() == 0:
+            log("   ❌ Не нашёл кнопку отправки отклика.")
+            add_to_manual_queue(link, title, company, "Не найдена кнопка отправки отклика")
+            return "no_submit"
+
         try:
             submit_btn.click()
             page.wait_for_timeout(2500)
@@ -272,13 +453,35 @@ def respond_to_vacancy(page, vacancy):
             add_to_manual_queue(link, title, company, "Ошибка отправки отклика")
             return "send_error"
 
-        log("   ✅ ОТКЛИК ОТПРАВЛЕН (попап)!")
+        if not (
+            verify_response_sent(page)
+            or page.locator(CHAT_RESPONSE_BUTTON_QA).count() > 0
+        ):
+            log("   ⚠️ Нет подтверждения, что отклик ушёл. В ручную очередь.")
+            add_to_manual_queue(link, title, company, "Нет подтверждения отправки отклика")
+            return "no_submit"
+
+        log("   ✅ ОТКЛИК ОТПРАВЛЕН (попап) с письмом!")
         add_sent_application(link, title, company, score, status="sent")
         return "sent"
 
-    if verify_response_sent(page):
-        add_sent_application(link, title, company, score, status="sent")
-        return "sent"
+    # --- НОВЫЙ ИНТЕРФЕЙС: отклик уходит сразу, письмо добавляется в чате ---
+    if (
+        page.locator(CHAT_RESPONSE_BUTTON_QA).count() > 0
+        or has_visible(page, 'text=Вы откликнулись')
+        or find_chat_frame(page, timeout_ms=2000)
+    ):
+        log("   💬 Отклик отправлен. Прикрепляю письмо в чате...")
+        if send_letter_in_chat(page, letter, title, company):
+            add_sent_application(link, title, company, score, status="sent")
+            return "sent"
+
+        log("   ⚠️ Отклик ушёл, но письмо не прикрепилось. В ручную очередь.")
+        add_sent_application(link, title, company, score, status="no_letter")
+        add_to_manual_queue(
+            link, title, company, "Отклик отправлен без письма — прикрепи вручную в чате"
+        )
+        return "chat_failed"
 
     return "no_submit"
 
@@ -388,7 +591,12 @@ def main():
                     consecutive_errors = 0
 
                 if i < len(to_send):
-                    random_delay()
+                    # Архив/уже отправлено/чужое название — это просто пропуск,
+                    # не тратим на них 5–15 минут.
+                    if result in ("archived", "already", "title_mismatch"):
+                        page.wait_for_timeout(random.randint(8000, 15000))
+                    else:
+                        random_delay()
 
         except KeyboardInterrupt:
             log("\n🛑 СТОП по команде пользователя (Ctrl+C).")

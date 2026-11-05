@@ -6,7 +6,7 @@ from urllib.parse import parse_qs, urlparse
 
 import database
 from hh_analyzer import normalize_scores, parse_llm_response
-from hh_executor import build_queue
+from hh_executor import build_queue, normalize_title
 from hh_scanner_multi import build_search_url, normalize_link
 from hh_writer import normalize_letters, select_new, select_pending
 from utils import clamp, page_is_closed, read_json, write_json
@@ -108,6 +108,16 @@ class TestExecutorQueue(unittest.TestCase):
         queue = build_queue(letters, {"b"}, limit=10)
         self.assertEqual([i["link"] for i in queue], ["a", "d"])
 
+    def test_normalize_title_ignores_dash_and_punctuation(self):
+        self.assertEqual(
+            normalize_title("Специалист по автоматизации бизнес‑процессов (ИИ‑технологии)"),
+            normalize_title("Специалист по автоматизации бизнес-процессов, ИИ-технологии"),
+        )
+        self.assertNotEqual(
+            normalize_title("Системный администратор"),
+            normalize_title("IT-программист / AI-разработчик"),
+        )
+
 
 class TestDatabase(unittest.TestCase):
     def setUp(self):
@@ -141,10 +151,11 @@ class TestDatabase(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(status, "sent")
 
-    def test_today_count_counts_only_sent(self):
+    def test_today_count_counts_real_responses(self):
         database.add_sent_application("a", "t", "c", 90, status="sent", db_path=self.db)
-        database.add_sent_application("b", "t", "c", 10, status="archived", db_path=self.db)
-        self.assertEqual(database.get_today_sent_count(self.db), 1)
+        database.add_sent_application("b", "t", "c", 80, status="no_letter", db_path=self.db)
+        database.add_sent_application("c", "t", "c", 10, status="archived", db_path=self.db)
+        self.assertEqual(database.get_today_sent_count(self.db), 2)
 
     def test_manual_queue_deduplicates(self):
         database.add_to_manual_queue("a", "t", "c", "reason", db_path=self.db)
