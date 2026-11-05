@@ -7,7 +7,12 @@ from urllib.parse import parse_qs, urlparse
 
 import database
 from hh_analyzer import normalize_scores, parse_llm_response
-from hh_executor import build_queue, normalize_title
+from hh_executor import (
+    build_queue,
+    normalize_title,
+    parse_answers_response,
+    validate_question_answers,
+)
 from hh_scanner_multi import build_search_url, normalize_link
 from hh_writer import normalize_letters, select_new, select_pending
 from utils import clamp, page_is_closed, read_json, write_json
@@ -118,6 +123,67 @@ class TestExecutorQueue(unittest.TestCase):
             normalize_title("Системный администратор"),
             normalize_title("IT-программист / AI-разработчик"),
         )
+
+
+class TestQuestionAnswers(unittest.TestCase):
+    def test_parse_answers_from_markdown(self):
+        raw = '```json\n{"answers": [{"index": 1, "value": "Да"}]}\n```'
+        self.assertEqual(
+            parse_answers_response(raw),
+            [{"index": 1, "value": "Да"}],
+        )
+
+    def test_parse_answers_from_plain_list(self):
+        self.assertEqual(
+            parse_answers_response('[{"index": 1, "value": "Нет"}]'),
+            [{"index": 1, "value": "Нет"}],
+        )
+
+    def test_validate_radio_is_case_insensitive_and_text_is_trimmed(self):
+        questions = [
+            {"index": 0, "type": "radio", "options": ["Да", "Нет"], "max_length": None},
+            {"index": 1, "type": "text", "options": [], "max_length": 10},
+        ]
+        answers = validate_question_answers(
+            questions,
+            [
+                {"index": 1, "value": "да"},
+                {"index": 2, "value": "Очень длинный ответ"},
+            ],
+        )
+        self.assertEqual(answers[0], "Да")
+        self.assertEqual(answers[1], "Очень длин")
+
+    def test_validate_rejects_unknown_and_empty_answers(self):
+        radio = [
+            {
+                "index": 0,
+                "type": "radio",
+                "options": ["Да", "Нет"],
+                "max_length": None,
+            }
+        ]
+        text = [{"index": 0, "type": "text", "options": [], "max_length": None}]
+        self.assertIsNone(
+            validate_question_answers(radio, [{"index": 1, "value": "Может быть"}])
+        )
+        self.assertIsNone(
+            validate_question_answers(text, [{"index": 1, "value": "   "}])
+        )
+
+    def test_validate_checkbox_list(self):
+        questions = [
+            {
+                "index": 0,
+                "type": "checkbox",
+                "options": ["Python", "SQL", "Git"],
+                "max_length": None,
+            }
+        ]
+        answers = validate_question_answers(
+            questions, [{"index": 1, "value": ["python", "Git"]}]
+        )
+        self.assertEqual(answers[0], ["Python", "Git"])
 
 
 class TestDatabase(unittest.TestCase):

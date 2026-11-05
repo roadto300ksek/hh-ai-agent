@@ -1,3 +1,4 @@
+import json
 import random
 import sys
 import time
@@ -5,6 +6,7 @@ from datetime import datetime
 
 from playwright.sync_api import sync_playwright
 
+from config import CANDIDATE_ANSWER_RULES, CANDIDATE_INFO, ask_llm
 from database import (
     add_sent_application,
     add_to_manual_queue,
@@ -45,6 +47,13 @@ CHAT_SEND_QA = '[data-qa="chatik-do-send-message"]'
 CHAT_PREVIEW_QA = '[data-qa="chat-input-preview"]'
 CHAT_RESPONSE_BUTTON_QA = '[data-qa="vacancy-response-link-view-topic"]'
 NO_LETTER_TEXT = "Без сопроводительного письма"
+
+# Анкета работодателя на странице отклика: каждый вопрос — отдельный task-body.
+TASK_BODY_QA = '[data-qa="task-body"]'
+TASK_QUESTION_QA = '[data-qa="task-question"]'
+RESPONSE_LETTER_QA = '[data-qa="vacancy-response-popup-form-letter-input"]'
+RESPONSE_SUBMIT_QA = '[data-qa="vacancy-response-submit-popup"]'
+RESPONSE_SUCCESS_QA = '[data-qa="responded-success-attach-cover-letter"]'
 
 ERROR_RESULTS = {
     "no_button",
@@ -105,15 +114,18 @@ def check_auth_on_main(page):
 
 def check_questions(page):
     return (
-        has_visible(page, '[data-qa="vacancy-response-question"]')
+        page.locator(TASK_BODY_QA).count() > 0
+        or has_visible(page, '[data-qa="vacancy-response-question"]')
         or has_visible(page, 'button:has-text("Ответить на вопросы")')
     )
 
 
 def verify_response_sent(page):
     return (
-        has_visible(page, 'text=Отклик отправлен')
+        has_visible(page, RESPONSE_SUCCESS_QA)
+        or has_visible(page, 'text=Отклик отправлен')
         or has_visible(page, 'text=Вы откликнулись')
+        or has_visible(page, CHAT_RESPONSE_BUTTON_QA)
     )
 
 
@@ -426,6 +438,377 @@ def get_live_vacancy_title(page):
     return ""
 
 
+def get_vacancy_description(page, limit=2500):
+    """Текст описания вакансии — нужен для ответов про продукт компании."""
+    selectors = (
+        '[data-qa="vacancy-description"]',
+        '[data-qa="vacancy-description-text"]',
+    )
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            if locator.count() > 0 and locator.is_visible():
+                return normalize_text(locator.inner_text())[:limit]
+        except Exception:
+            continue
+    return ""
+
+
+def get_vacancy_salary(page):
+    """Вилка зарплаты с hh.ru, если указана."""
+    selectors = (
+        '[data-qa="vacancy-salary"]',
+        '[data-qa="vacancy-salary-compensation"]',
+        '[data-qa="vacancy-compensation"]',
+    )
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            if locator.count() > 0 and locator.is_visible():
+                return normalize_text(locator.inner_text())
+        except Exception:
+            continue
+    return ""
+
+
+def _control_max_length(locator):
+    try:
+        value = locator.evaluate("el => el.getAttribute('maxlength')")
+        return int(value) if value else None
+    except Exception:
+        return None
+
+
+def _input_label(locator):
+    try:
+        return normalize_text(
+            locator.evaluate(
+                "el => el.closest('label') ? el.closest('label').innerText : ''"
+            )
+        )
+    except Exception:
+        return ""
+
+
+def collect_questions(page):
+    """Разбирает анкету работодателя в список вопросов с типами и вариантами."""
+    blocks = page.locator(TASK_BODY_QA)
+    questions = []
+    for i in range(blocks.count()):
+        block = blocks.nth(i)
+        try:
+            question_text = normalize_text(
+                block.locator(TASK_QUESTION_QA).first.inner_text()
+            )
+        except Exception:
+            continue
+
+        radios = block.locator('input[type="radio"]')
+        textareas = block.locator("textarea")
+        text_inputs = block.locator('input[type="text"], input:not([type])')
+        checkboxes = block.locator('input[type="checkbox"]')
+        selects = block.locator("select")
+
+        groups = [
+            (radios, "radio"),
+            (textareas, "text"),
+            (text_inputs, "text"),
+            (checkboxes, "checkbox"),
+            (selects, "select"),
+        ]
+        present = [(locator, kind) for locator, kind in groups if locator.count() > 0]
+
+        item = {
+            "index": i,
+            "text": question_text,
+            "type": "unsupported",
+            "options": [],
+            "name": "",
+            "max_length": None,
+        }
+        if len(present) != 1:
+            questions.append(item)
+            continue
+
+        control, kind = present[0]
+        item["type"] = kind
+        item["name"] = control.first.get_attribute("name") or ""
+
+        if kind in ("radio", "checkbox"):
+            options = []
+            for j in range(control.count()):
+                label = _input_label(control.nth(j))
+                if label and label not in options:
+                    options.append(label)
+            item["options"] = options
+        elif kind == "text":
+            item["max_length"] = _control_max_length(control.first)
+        elif kind == "select":
+            options = []
+            option_locator = control.first.locator("option")
+            for j in range(option_locator.count()):
+                option = option_locator.nth(j)
+                label = normalize_text(option.inner_text())
+                if label and (option.get_attribute("value") or ""):
+                    options.append(label)
+            item["options"] = options
+
+        questions.append(item)
+    return questions
+
+
+def build_questions_prompt(questions, vacancy, description="", salary=""):
+    lines = []
+    for item in questions:
+        number = item["index"] + 1
+        line = f"{number}. {item['text']}"
+        if item["type"] in ("radio", "select"):
+            line += "\n   Тип: выбери ровно один вариант. Варианты: " + " / ".join(
+                item["options"]
+            )
+        elif item["type"] == "checkbox":
+            line += "\n   Тип: можно выбрать несколько. Варианты: " + " / ".join(
+                item["options"]
+            )
+        elif item["type"] == "text":
+            line += "\n   Тип: текстовый ответ (1-3 предложения)."
+        else:
+            line += "\n   Тип: не поддерживается."
+        lines.append(line)
+
+    return f"""Ты заполняешь анкету работодателя на hh.ru за кандидата.
+
+ПРОФИЛЬ КАНДИДАТА:
+{CANDIDATE_INFO}
+
+{CANDIDATE_ANSWER_RULES}
+
+ВАКАНСИЯ:
+Название: {vacancy.get('title', '')}
+Компания: {vacancy.get('company', '')}
+Зарплата: {salary or 'не указана'}
+Описание: {description or 'не удалось прочитать'}
+
+ВОПРОСЫ:
+{chr(10).join(lines)}
+
+Верни строго JSON без markdown:
+{{"answers": [{{"index": 1, "value": "ответ"}}, ...]}}
+
+Требования:
+- index — номер вопроса из списка (с 1).
+- Для radio/select — ровно один вариант из списка, слово в слово.
+- Для checkbox — JSON-массив выбранных вариантов.
+- Для text — краткий ответ 1-3 предложения, по делу, без воды.
+- Если для ответа не хватает фактов, верни value: "".
+- Не придумывай опыт, компании, цифры и проекты.
+"""
+
+
+def parse_answers_response(text):
+    """Достаёт список ответов из JSON-ответа DeepSeek."""
+    text = (text or "").strip()
+    if text.startswith("```"):
+        parts = text.split("```")
+        if len(parts) >= 2:
+            text = parts[1]
+        if text.strip().startswith("json"):
+            text = text.strip()[4:]
+    text = text.strip()
+    if not text:
+        raise ValueError("Пустой ответ модели")
+
+    data = json.loads(text)
+    if isinstance(data, dict):
+        for key in ("answers", "results", "items"):
+            if isinstance(data.get(key), list):
+                return data[key]
+        raise ValueError("В ответе модели нет списка answers")
+    if isinstance(data, list):
+        return data
+    raise ValueError("Неожиданный формат ответа модели")
+
+
+def validate_question_answers(questions, raw_answers):
+    """Сверяет ответы модели с вариантами. None — если ответы неполные."""
+    by_index = {}
+    for item in raw_answers or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("index")) - 1
+        except (TypeError, ValueError):
+            continue
+        by_index[index] = item.get("value")
+
+    answers = {}
+    for question in questions:
+        index = question["index"]
+        value = by_index.get(index)
+
+        if question["type"] == "unsupported":
+            return None
+
+        if question["type"] in ("radio", "select"):
+            if not isinstance(value, str):
+                return None
+            normalized = normalize_text(value).lower()
+            match = next(
+                (
+                    option
+                    for option in question["options"]
+                    if normalize_text(option).lower() == normalized
+                ),
+                None,
+            )
+            if not match:
+                return None
+            answers[index] = match
+
+        elif question["type"] == "checkbox":
+            if isinstance(value, str):
+                value = [value]
+            if not isinstance(value, list) or not value:
+                return None
+            selected = []
+            for raw in value:
+                normalized = normalize_text(str(raw)).lower()
+                match = next(
+                    (
+                        option
+                        for option in question["options"]
+                        if normalize_text(option).lower() == normalized
+                    ),
+                    None,
+                )
+                if not match:
+                    return None
+                selected.append(match)
+            answers[index] = selected
+
+        elif question["type"] == "text":
+            if not isinstance(value, str) or not value.strip():
+                return None
+            text = value.strip()
+            if question.get("max_length"):
+                text = text[: question["max_length"]]
+            answers[index] = text
+
+        else:
+            return None
+
+    return answers
+
+
+def fill_question_answers(page, questions, answers):
+    """Заполняет поля анкеты. Возвращает True, если все ответы введены."""
+    blocks = page.locator(TASK_BODY_QA)
+    for question in questions:
+        index = question["index"]
+        if index >= blocks.count():
+            log(f"   ⚠️ Пропал блок вопроса {index + 1}.")
+            return False
+        block = blocks.nth(index)
+        value = answers.get(index)
+
+        try:
+            if question["type"] == "radio":
+                clicked = False
+                labels = block.locator("label")
+                for j in range(labels.count()):
+                    label = labels.nth(j)
+                    if not label.is_visible():
+                        continue
+                    if normalize_text(label.inner_text()).lower() == normalize_text(
+                        value
+                    ).lower():
+                        label.click()
+                        clicked = True
+                        break
+                if not clicked:
+                    log(f"   ⚠️ Не нашёл вариант «{value}».")
+                    return False
+                checked = any(
+                    block.locator('input[type="radio"]').nth(j).is_checked()
+                    for j in range(block.locator('input[type="radio"]').count())
+                )
+                if not checked:
+                    log("   ⚠️ Вариант не выбрался.")
+                    return False
+
+            elif question["type"] == "checkbox":
+                for selected_value in value:
+                    clicked = False
+                    labels = block.locator("label")
+                    for j in range(labels.count()):
+                        label = labels.nth(j)
+                        if not label.is_visible():
+                            continue
+                        if normalize_text(label.inner_text()).lower() == normalize_text(
+                            selected_value
+                        ).lower():
+                            label.click()
+                            clicked = True
+                            break
+                    if not clicked:
+                        log(f"   ⚠️ Не нашёл вариант «{selected_value}».")
+                        return False
+
+            elif question["type"] == "text":
+                field = block.locator("textarea").first
+                if field.count() == 0:
+                    field = block.locator('input[type="text"], input:not([type])').first
+                if field.count() == 0 or not field.is_visible():
+                    log(f"   ⚠️ Не нашёл поле для вопроса {index + 1}.")
+                    return False
+                field.click()
+                field.fill(value)
+                if not (field.input_value() or "").strip():
+                    log(f"   ⚠️ Поле вопроса {index + 1} осталось пустым.")
+                    return False
+
+            elif question["type"] == "select":
+                select = block.locator("select").first
+                if select.count() == 0 or not select.is_visible():
+                    log(f"   ⚠️ Не нашёл список для вопроса {index + 1}.")
+                    return False
+                select.select_option(label=value)
+
+            else:
+                return False
+
+            shown = ", ".join(value) if isinstance(value, list) else str(value)
+            log(f"   ✅ Вопрос {index + 1}: {shown[:90]}")
+        except Exception as e:
+            log(f"   ⚠️ Не удалось заполнить вопрос {index + 1}: {e}")
+            return False
+
+    return True
+
+
+def answer_questions(page, vacancy, description="", salary=""):
+    """Генерирует и вводит ответы на вопросы работодателя."""
+    questions = collect_questions(page)
+    if not questions:
+        log("   ⚠️ Блоки вопросов не найдены.")
+        return False
+
+    log(f"   📝 Вопросов: {len(questions)}. Генерирую ответы через DeepSeek...")
+    try:
+        prompt = build_questions_prompt(questions, vacancy, description, salary)
+        raw = ask_llm(prompt, temperature=0.2, json_mode=True)
+        answers = validate_question_answers(questions, parse_answers_response(raw))
+    except Exception as e:
+        log(f"   ⚠️ Ошибка при генерации ответов: {e}")
+        return False
+
+    if answers is None:
+        log("   ⚠️ Ответы неполные или не совпали с вариантами.")
+        return False
+
+    return fill_question_answers(page, questions, answers)
+
+
 def respond_to_vacancy(page, vacancy):
     link = vacancy["link"]
     title = vacancy.get("title", "")
@@ -454,6 +837,9 @@ def respond_to_vacancy(page, vacancy):
         log("   ⏭️  Пропускаю, чтобы не отправить письмо не под ту вакансию.")
         add_to_manual_queue(link, live_title, company, "Название вакансии изменилось")
         return "title_mismatch"
+
+    description = get_vacancy_description(page)
+    salary = get_vacancy_salary(page)
 
     # --- МЫ УЖЕ ОТКЛИКАЛИСЬ РАНЕЕ? ---
     if page.locator(CHAT_RESPONSE_BUTTON_QA).count() > 0 or has_visible(
@@ -486,9 +872,15 @@ def respond_to_vacancy(page, vacancy):
 
     # --- ВОПРОСЫ РАБОТОДАТЕЛЯ ---
     if check_questions(page):
-        log("   ⚠️ Вопросы работодателя. В ручную очередь.")
-        add_to_manual_queue(link, title, company, "Требуются ответы на вопросы")
-        return "manual_questions"
+        log("   📝 Есть вопросы работодателя. Отвечаю автоматически...")
+        take_screenshot(page, "questions_form")
+        if not answer_questions(page, vacancy, description, salary):
+            log("   ⚠️ Не удалось ответить на вопросы. В ручную очередь.")
+            add_to_manual_queue(
+                link, title, company, "Не удалось ответить на вопросы работодателя"
+            )
+            return "manual_questions"
+        page.wait_for_timeout(1500)
 
     # --- КЛАССИЧЕСКИЙ ПОПАП С ПОЛЕМ ПИСЬМА ---
     letter_field = page.locator('[data-qa="vacancy-response-popup-form-letter-input"]').first
