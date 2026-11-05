@@ -6,7 +6,12 @@ from datetime import datetime
 
 from playwright.sync_api import sync_playwright
 
-from config import CANDIDATE_ANSWER_RULES, CANDIDATE_INFO, ask_llm
+from config import (
+    CANDIDATE_ANSWER_RULES,
+    CANDIDATE_ANSWERS,
+    CANDIDATE_INFO,
+    ask_llm,
+)
 from database import (
     add_sent_application,
     add_to_manual_queue,
@@ -490,6 +495,103 @@ def _input_label(locator):
         return ""
 
 
+OPTION_SYNONYMS = {
+    "тк": ("трудовой договор", "трудовой", "официальное трудоустройство"),
+    "гпх": (
+        "договор гпх",
+        "гражданско-правового характера",
+        "самозанятость",
+        "самозанятый",
+        "ип",
+    ),
+    "да": ("есть", "имеется", "конечно", "согласен", "согласна"),
+    "нет": ("не имею", "отсутствует", "не было"),
+}
+
+
+def _normalize_option(value):
+    return normalize_text(str(value)).lower().strip(" .,:;!?")
+
+
+def _match_option(options, value):
+    """Ищет вариант, даже если модель ответила полной фразой."""
+    needle = _normalize_option(value)
+    if not needle:
+        return None
+
+    for option in options:
+        if _normalize_option(option) == needle:
+            return option
+
+    for option in options:
+        opt = _normalize_option(option)
+        if opt and (
+            needle.startswith(opt + " ") or opt.startswith(needle + " ")
+        ):
+            return option
+        if len(opt) >= 3 and len(needle) >= 3 and (opt in needle or needle in opt):
+            return option
+
+    for option in options:
+        opt = _normalize_option(option)
+        for synonym in OPTION_SYNONYMS.get(opt, ()):
+            if synonym in needle:
+                return option
+    return None
+
+
+def fallback_answer(question):
+    """Безопасный ответ, если модель не дала валидный вариант."""
+    text = question["text"].lower()
+
+    if question["type"] == "text":
+        if any(word in text for word in ("тг", "telegram", "телеграм")):
+            return f"Telegram: {CANDIDATE_ANSWERS['telegram']}"
+        if any(word in text for word in ("телефон", "номер телефона")):
+            return CANDIDATE_ANSWERS["phone"]
+        if any(word in text for word in ("почт", "email", "e-mail")):
+            return CANDIDATE_ANSWERS["email"]
+        if "зарплат" in text:
+            return (
+                f"Минимум {CANDIDATE_ANSWERS['salary_min']}, "
+                f"комфорт {CANDIDATE_ANSWERS['salary_comfort']}."
+            )
+        if any(word in text for word in ("опыт", "расскаж", "какие", "почему")):
+            return (
+                "Пока нет коммерческого опыта именно в этом, но есть релевантные "
+                "пет-проекты на Python, Playwright и DeepSeek API; готов быстро "
+                "разобраться в задачах и обсудить детали на собеседовании."
+            )
+        return "Готов обсудить детали на собеседовании."
+
+    if question["type"] in ("radio", "select") and question["options"]:
+        options = [(option, _normalize_option(option)) for option in question["options"]]
+        if any(word in text for word in ("соглас", "обработк", "персональн")):
+            for option, opt in options:
+                if opt in ("да", "согласен", "согласна"):
+                    return option
+        if any(word in text for word in ("опыт", "есть ли", "работали")):
+            for option, opt in options:
+                if opt == "нет":
+                    return option
+        if any(word in text for word in ("трудоустройств", "формат", "договор")):
+            for option, opt in options:
+                if opt in ("тк", "трудовой договор"):
+                    return option
+
+    return None
+
+
+def _visible_count(locator, limit=20):
+    """Сколько элементов реально видно (скрытые условные поля не считаем)."""
+    try:
+        return sum(
+            1 for i in range(min(locator.count(), limit)) if locator.nth(i).is_visible()
+        )
+    except Exception:
+        return 0
+
+
 def collect_questions(page):
     """Разбирает анкету работодателя в список вопросов с типами и вариантами."""
     blocks = page.locator(TASK_BODY_QA)
@@ -510,13 +612,13 @@ def collect_questions(page):
         selects = block.locator("select")
 
         groups = [
-            (radios, "radio"),
-            (textareas, "text"),
-            (text_inputs, "text"),
-            (checkboxes, "checkbox"),
-            (selects, "select"),
+            (radios, "radio", radios.count() > 0),
+            (textareas, "text", _visible_count(textareas) > 0),
+            (text_inputs, "text", _visible_count(text_inputs) > 0),
+            (checkboxes, "checkbox", checkboxes.count() > 0),
+            (selects, "select", _visible_count(selects) > 0),
         ]
-        present = [(locator, kind) for locator, kind in groups if locator.count() > 0]
+        present = [(locator, kind) for locator, kind, ok in groups if ok]
 
         item = {
             "index": i,
@@ -629,8 +731,13 @@ def parse_answers_response(text):
     raise ValueError("Неожиданный формат ответа модели")
 
 
-def validate_question_answers(questions, raw_answers):
-    """Сверяет ответы модели с вариантами. None — если ответы неполные."""
+def validate_question_answers(questions, raw_answers, allow_fallback=False):
+    """Сверяет ответы модели с вариантами. None — если ответы неполные.
+
+    allow_fallback=True включает безопасные запасные ответы для типовых
+    вопросов (контакты, зарплата, формат трудоустройства), чтобы анкета
+    не срывалась из-за одной неточности модели.
+    """
     by_index = {}
     for item in raw_answers or []:
         if not isinstance(item, dict):
@@ -650,17 +757,9 @@ def validate_question_answers(questions, raw_answers):
             return None
 
         if question["type"] in ("radio", "select"):
-            if not isinstance(value, str):
-                return None
-            normalized = normalize_text(value).lower()
-            match = next(
-                (
-                    option
-                    for option in question["options"]
-                    if normalize_text(option).lower() == normalized
-                ),
-                None,
-            )
+            match = _match_option(question["options"], value) if isinstance(value, str) else None
+            if not match and allow_fallback:
+                match = fallback_answer(question)
             if not match:
                 return None
             answers[index] = match
@@ -672,24 +771,18 @@ def validate_question_answers(questions, raw_answers):
                 return None
             selected = []
             for raw in value:
-                normalized = normalize_text(str(raw)).lower()
-                match = next(
-                    (
-                        option
-                        for option in question["options"]
-                        if normalize_text(option).lower() == normalized
-                    ),
-                    None,
-                )
+                match = _match_option(question["options"], raw)
                 if not match:
                     return None
                 selected.append(match)
             answers[index] = selected
 
         elif question["type"] == "text":
-            if not isinstance(value, str) or not value.strip():
+            text = value.strip() if isinstance(value, str) else ""
+            if not text and allow_fallback:
+                text = fallback_answer(question) or ""
+            if not text:
                 return None
-            text = value.strip()
             if question.get("max_length"):
                 text = text[: question["max_length"]]
             answers[index] = text
@@ -787,26 +880,44 @@ def fill_question_answers(page, questions, answers):
 
 
 def answer_questions(page, vacancy, description="", salary=""):
-    """Генерирует и вводит ответы на вопросы работодателя."""
+    """Генерирует и вводит ответы на вопросы работодателя.
+
+    Две попытки: первая — обычная, вторая — с запасными ответами для
+    типовых вопросов. Это не даёт анкете сорваться из-за одной неточности.
+    """
     questions = collect_questions(page)
     if not questions:
         log("   ⚠️ Блоки вопросов не найдены.")
         return False
 
     log(f"   📝 Вопросов: {len(questions)}. Генерирую ответы через DeepSeek...")
-    try:
-        prompt = build_questions_prompt(questions, vacancy, description, salary)
-        raw = ask_llm(prompt, temperature=0.2, json_mode=True)
-        answers = validate_question_answers(questions, parse_answers_response(raw))
-    except Exception as e:
-        log(f"   ⚠️ Ошибка при генерации ответов: {e}")
-        return False
+    last_raw = ""
+    for attempt in range(1, 3):
+        try:
+            prompt = build_questions_prompt(questions, vacancy, description, salary)
+            if attempt > 1 and last_raw:
+                prompt += (
+                    "\n\nПредыдущий ответ отклонён: не все вопросы заполнены "
+                    "или вариант не совпал. Ответь заново на ВСЕ вопросы.\n"
+                    f"Предыдущий ответ: {last_raw[:1500]}"
+                )
+            raw = ask_llm(prompt, temperature=0.2, json_mode=True)
+            last_raw = raw
+            answers = validate_question_answers(
+                questions,
+                parse_answers_response(raw),
+                allow_fallback=(attempt == 2),
+            )
+        except Exception as e:
+            log(f"   ⚠️ Ошибка генерации ответов (попытка {attempt}/2): {e}")
+            continue
 
-    if answers is None:
-        log("   ⚠️ Ответы неполные или не совпали с вариантами.")
-        return False
+        if answers is not None:
+            return fill_question_answers(page, questions, answers)
+        log(f"   ⚠️ Попытка {attempt}/2: ответы неполные, пробую ещё раз...")
 
-    return fill_question_answers(page, questions, answers)
+    log("   ⚠️ Не удалось получить полные ответы на вопросы.")
+    return False
 
 
 def response_is_sent(page):
@@ -824,6 +935,23 @@ def wait_for_response_marker(page, timeout_sec=15):
     return False
 
 
+def safe_goto(page, url, attempts=2):
+    """Открывает страницу с повтором: hh иногда обрывает переход редиректом."""
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            page.goto(url, wait_until="domcontentloaded")
+            return True
+        except Exception as e:
+            last_error = e
+            try:
+                page.wait_for_timeout(2000)
+            except Exception:
+                break
+    log(f"   ⚠️ Не удалось открыть страницу: {last_error}")
+    return False
+
+
 def respond_to_vacancy(page, vacancy):
     link = vacancy["link"]
     title = vacancy.get("title", "")
@@ -832,7 +960,8 @@ def respond_to_vacancy(page, vacancy):
     score = vacancy.get("score", 0)
 
     log(f"🌐 Открываю: {link}")
-    page.goto(link, wait_until="domcontentloaded")
+    if not safe_goto(page, link):
+        return "exception"
     page.wait_for_timeout(random.randint(3000, 5000))
 
     if check_captcha(page):
@@ -909,7 +1038,20 @@ def respond_to_vacancy(page, vacancy):
         log("   📝 Есть вопросы работодателя. Отвечаю автоматически...")
         take_screenshot(page, "questions_form")
         if not answer_questions(page, vacancy, description, salary):
-            log("   ⚠️ Не удалось ответить на вопросы. В ручную очередь.")
+            log("   ⚠️ Не удалось ответить на вопросы.")
+            # На hh отклик часто уходит сразу после клика, даже если анкета
+            # не отправлена. Возвращаемся на вакансию и хотя бы прикрепляем письмо.
+            if safe_goto(page, link):
+                page.wait_for_timeout(4000)
+            if letter and response_is_sent(page):
+                log("   💬 Отклик уже ушёл, прикрепляю письмо...")
+                if send_letter_in_chat(page, letter, title, company):
+                    add_sent_application(link, title, company, score, status="sent")
+                    add_to_manual_queue(
+                        link, title, company, "Отклик отправлен, но вопросы без ответов"
+                    )
+                    return "sent"
+                add_sent_application(link, title, company, score, status="no_letter")
             add_to_manual_queue(
                 link, title, company, "Не удалось ответить на вопросы работодателя"
             )
@@ -1048,12 +1190,9 @@ def retry_failed_letters(page, cover_letters):
         company = vacancy.get("company", "")
         log(f"\n🔁 [{i}/{len(candidates)}] {title} - {company}")
 
-        try:
-            page.goto(link, wait_until="domcontentloaded")
-            page.wait_for_timeout(random.randint(3000, 5000))
-        except Exception as e:
-            log(f"   ⚠️ Не удалось открыть вакансию: {e}")
+        if not safe_goto(page, link):
             continue
+        page.wait_for_timeout(random.randint(3000, 5000))
 
         if check_captcha(page):
             log("   🚨 КАПЧА! Останавливаю повторную отправку.")

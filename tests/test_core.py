@@ -171,6 +171,70 @@ class TestQuestionAnswers(unittest.TestCase):
             validate_question_answers(text, [{"index": 1, "value": "   "}])
         )
 
+    def test_option_matching_handles_full_phrases(self):
+        questions = [
+            {
+                "index": 0,
+                "text": "Формат трудоустройства?",
+                "type": "radio",
+                "options": ["ТК", "ГПХ"],
+                "max_length": None,
+            },
+            {
+                "index": 1,
+                "text": "Есть ли опыт?",
+                "type": "radio",
+                "options": ["Да", "Нет"],
+                "max_length": None,
+            },
+        ]
+        answers = validate_question_answers(
+            questions,
+            [
+                {"index": 1, "value": "Трудовой договор"},
+                {"index": 2, "value": "Да, есть опыт"},
+            ],
+        )
+        self.assertEqual(answers[0], "ТК")
+        self.assertEqual(answers[1], "Да")
+
+    def test_fallback_answers_contacts_salary_and_employment(self):
+        questions = [
+            {
+                "index": 0,
+                "text": "Укажите ваш ТГ для связи",
+                "type": "text",
+                "options": [],
+                "max_length": None,
+            },
+            {
+                "index": 1,
+                "text": "Какие ваши ожидания по зарплате?",
+                "type": "text",
+                "options": [],
+                "max_length": None,
+            },
+            {
+                "index": 2,
+                "text": "Расскажите о формате трудоустройства",
+                "type": "radio",
+                "options": ["ТК", "ГПХ", "Свой вариант"],
+                "max_length": None,
+            },
+        ]
+        answers = validate_question_answers(
+            questions,
+            [
+                {"index": 1, "value": ""},
+                {"index": 2, "value": ""},
+                {"index": 3, "value": ""},
+            ],
+            allow_fallback=True,
+        )
+        self.assertIn("@username", answers[0])
+        self.assertIn("<МИНИМУМ>", answers[1])
+        self.assertEqual(answers[2], "ТК")
+
     def test_validate_checkbox_list(self):
         questions = [
             {
