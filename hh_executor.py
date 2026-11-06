@@ -556,10 +556,13 @@ def fallback_answer(question):
                 f"Минимум {CANDIDATE_ANSWERS['salary_min']}, "
                 f"комфорт {CANDIDATE_ANSWERS['salary_comfort']}."
             )
+        if "тест" in text:
+            return CANDIDATE_ANSWERS.get("ready_for_test", "Готов выполнить тестовое задание.")
         if any(word in text for word in ("опыт", "расскаж", "какие", "почему")):
             return (
-                "Пока нет коммерческого опыта именно в этом, но есть релевантные "
-                "пет-проекты на Python, Playwright и DeepSeek API; готов быстро "
+                "Коммерческого опыта именно в этом направлении пока нет, но есть "
+                "6 месяцев плотной разработки пет-проектов на Python: Playwright, "
+                "FastAPI, asyncio, интеграции с DeepSeek API. Готов быстро "
                 "разобраться в задачах и обсудить детали на собеседовании."
             )
         return "Готов обсудить детали на собеседовании."
@@ -569,6 +572,10 @@ def fallback_answer(question):
         if any(word in text for word in ("соглас", "обработк", "персональн")):
             for option, opt in options:
                 if opt in ("да", "согласен", "согласна"):
+                    return option
+        if any(word in text for word in ("тестов", "тестовое")):
+            for option, opt in options:
+                if opt in ("да", "готов", "готова"):
                     return option
         if any(word in text for word in ("опыт", "есть ли", "работали")):
             for option, opt in options:

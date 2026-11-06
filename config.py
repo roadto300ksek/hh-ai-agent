@@ -17,9 +17,9 @@ REQUEST_TIMEOUT = 60
 # ПРОФИЛЬ КАНДИДАТА (используется анализатором)
 # ============================================
 CANDIDATE_PROFILE = """
-Кандидат: начинающий Python-разработчик (Junior/Стажер/Intern), хочет работать в сфере автоматизации бизнес-процессов и AI-агентов.
-Навыки: Python, Playwright, OpenAI SDK, REST API, JSON, парсинг данных, работа с cookies/сессиями.
-Желаемая роль: Junior Python-разработчик, AI-инженер (Junior), RPA-разработчик (Junior), Стажер.
+Кандидат: Python-разработчик (Junior/Junior+), специализация — автоматизация бизнес-процессов, парсинг данных и интеграции с LLM/AI.
+Навыки: Python, Playwright, FastAPI, Flask, aiogram, asyncio, REST API, JSON, парсинг данных, OpenAI SDK / DeepSeek API, SQLite, Streamlit, Linux, APScheduler, Git.
+Желаемая роль: Junior/Junior+ Python-разработчик, AI-инженер (Junior), RPA-разработчик (Junior), Стажер.
 
 ГЕОГРАФИЯ И ФОРМАТ РАБОТЫ:
 - Идеально: удалённая работа.
@@ -27,9 +27,11 @@ CANDIDATE_PROFILE = """
 - Плохо: офис/гибрид в других городах без возможности удалёнки.
 
 ВАЖНО (УРОВЕНЬ ОПЫТА):
-- Ищем СТРОГО Junior, Intern, стажер, без опыта или с опытом 1 год.
+- Цель: Junior и Junior+. Стажёр/Intern тоже подходит.
 - Если в вакансии написано "Middle", "Middle+", "Senior", "Lead" или требуется опыт "от 2-3 лет", "3-6 лет" — ставь оценку 0-10.
-- Если требуется опыт "1-3 года" — оценивай внимательно, если стек совпадает, можешь поставить 40-60.
+- Если требуется опыт "1-3 года" и стек совпадает — оценивай внимательно, можно 40-60.
+
+Готов к тестовому заданию и быстрому выходу на задачи по автоматизации, парсингу, интеграциям и AI-фичам.
 
 НЕ подходят: 1С-разработка, Java, C++, PHP, менеджеры по продажам, преподаватели, вакансии без Python.
 """
@@ -40,19 +42,20 @@ CANDIDATE_PROFILE = """
 CANDIDATE_INFO = """
 Имя: <ИМЯ>
 Город: <ГОРОД>
-Формат работы: удалёнка (приоритет) или гибрид/офис в <ГОРОД>
-Резюме: Python-разработчик, специализация — автоматизация бизнес-процессов и AI-агенты.
+Формат работы: удалёнка или гибрид/офис в <ГОРОД>
+Резюме: Python-разработчик (Junior/Junior+), специализация — автоматизация, парсинг и AI-интеграции.
 
 Опыт и навыки:
-- Python (основной язык)
+- Python (основной язык), asyncio
 - Playwright (автоматизация браузера, обход антибот-защиты, парсинг)
-- OpenAI SDK / DeepSeek API (интеграция LLM в продукты)
+- FastAPI, Flask, aiogram (python-telegram-bot)
+- OpenAI SDK / DeepSeek API (интеграция LLM)
 - REST API, JSON, работа с cookies/сессиями
-- Git, Flask
+- SQLite, Streamlit, APScheduler, Linux, Git
 
 Пет-проекты:
-1. Telegram-бот для изучения иностранных языков (Python, OpenAI API, Flask, gTTS, Git).
-2. Мультиагентная система для автоматизации поиска работы на HeadHunter (Python, Playwright, LLM, REST API).
+1. Мультиагентная система автоматизации поиска работы на HeadHunter: 5 агентов (авторизация → сканер → аналитик → копирайтер → исполнитель), Python, Playwright, DeepSeek API, SQLite, Streamlit, unittest. Результат: 460+ карточек за прогон, ИИ-фильтр отсеивает 75% нерелевантного.
+2. Telegram-бот для изучения итальянского языка: python-telegram-bot, DeepSeek API, edge-tts/gTTS, Flask. 4 сценария диалога, перевод, объяснение грамматики, озвучка, деплой на PythonAnywhere.
 
 Тон письма: уверенный, но без пафоса. Деловой, живой, без штампов типа "стрессоустойчивый" и "командный игрок".
 """
@@ -66,7 +69,7 @@ CANDIDATE_ANSWERS = {
     "city": "<ГОРОД>",
     "citizenship": "Россия",
     "education": "<ОБРАЗОВАНИЕ>",
-    "it_experience": "коммерческого опыта в IT нет, только пет-проекты и фриланс",
+    "it_experience": "коммерческого опыта в IT нет; 6 месяцев активной разработки пет-проектов на Python",
     "total_experience": "<ОПЫТ>",
     "employment_format": "<ФОРМАТ ТРУДОУСТРОЙСТВА>",
     "salary_min": "<МИНИМУМ>",
@@ -75,10 +78,11 @@ CANDIDATE_ANSWERS = {
         "если в вакансии указана вилка — ориентироваться на неё; "
         "если вилка не указана — <МИНИМУМ> / <КОМФОРТ>"
     ),
-    "work_format": "только удалёнка",
+    "work_format": "удалёнка или гибрид в вашем городе",
     "relocation": "переезд в другой город не рассматриваю",
     "business_trips": "к командировкам готов",
     "start": "готов приступить сразу",
+    "ready_for_test": "готов выполнить тестовое задание",
     "english": "B1",
     "italian": "A2",
     "russian": "родной",
@@ -121,6 +125,7 @@ CANDIDATE_ANSWER_RULES = f"""
 - Зарплата: {CANDIDATE_ANSWERS['salary_note']}.
 - Формат работы: {CANDIDATE_ANSWERS['work_format']}. {CANDIDATE_ANSWERS['relocation']}. {CANDIDATE_ANSWERS['business_trips']}.
 - Старт: {CANDIDATE_ANSWERS['start']}.
+- Тестовое задание: {CANDIDATE_ANSWERS['ready_for_test']}.
 - Языки: английский {CANDIDATE_ANSWERS['english']}, итальянский {CANDIDATE_ANSWERS['italian']}, русский — {CANDIDATE_ANSWERS['russian']}.
 - Контакты: Telegram {CANDIDATE_ANSWERS['telegram']}, телефон {CANDIDATE_ANSWERS['phone']}, почта {CANDIDATE_ANSWERS['email']}. Указывать только если вопрос прямо просит контакт для связи.
 - GitHub: {CANDIDATE_ANSWERS['github']}
