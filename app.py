@@ -143,12 +143,8 @@ def render_process_status():
     if process_running():
         label = st.session_state.get("run_label", "процесс")
         st.info(f"⏳ Работает: {label}")
-        if st.button("Остановить процесс", width="stretch"):
-            stop_agent()
-            st.toast("Процесс остановлен.", icon="🛑")
-            st.rerun()
     elif st.session_state.get("run_proc") is not None:
-        st.success("✅ Последний запуск завершён.")
+        st.success("✅ Готово к запуску")
 
 
 # --- Боковая панель (Управление) ---
@@ -158,11 +154,8 @@ with st.sidebar:
     st.markdown("---")
 
     st.subheader("🚀 Запуск агентов")
-    st.caption("Все запуски — во вкладке «⚙️ Ручной запуск».")
+    st.caption("Управление — во вкладке «🚀 Запуск».")
     render_process_status()
-
-    if st.button("Обновить данные", width="stretch"):
-        st.rerun()
 
     st.markdown("---")
     state_status = "🟢 сессия сохранена" if STATE_FILE.exists() else "🔴 нет hh_state.json"
@@ -179,7 +172,7 @@ st.markdown(
     """
     <div class="hero">
       <h1>🤖 Панель управления AI-агентом</h1>
-      <p>Поиск вакансий, честные резюме и отклики под присмотром. Управление — вкладка «⚙️ Ручной запуск».</p>
+      <p>Поиск вакансий, честные резюме и отклики под присмотром. Управление — вкладка «🚀 Запуск».</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -228,7 +221,7 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "✉️ Очередь писем",
     "🗂 Резюме",
     "📋 Ручная очередь",
-    "⚙️ Ручной запуск",
+    "🚀 Запуск",
     "📜 Лог запуска",
 ])
 
@@ -334,7 +327,7 @@ with tab2:
             disabled=True,
         )
     else:
-        st.info("Очередь писем пуста. Сгенерируйте письма во вкладке «Ручной запуск».")
+        st.info("Очередь писем пуста. Сгенерируйте письма во вкладке «🚀 Запуск».")
 
 with tab3:
     st.subheader("Резюме для автоотбора")
@@ -356,9 +349,9 @@ with tab3:
             options=[item.get("link", "") for item in letters if isinstance(item, dict)],
         )
         vacancy = next((v for v in letters if isinstance(v, dict) and v.get("link") == rid), None)
-        if vacancy and st.button("Подобрать резюме"):
+        if vacancy:
             choice = choose_for_vacancy(vacancy)
-            st.success(f"{choice.resume_id} — {choice.title}")
+            st.info(f"**Выбор агента:** {choice.resume_id} — {choice.title}")
             st.caption(choice.reason)
     else:
         st.info("generated_resumes.json не найден.")
@@ -379,90 +372,84 @@ with tab4:
         st.success("Ручная очередь пуста! Агент справляется сам.")
 
 with tab5:
-    st.subheader("Ручной запуск агентов")
+    st.subheader("Запуск агентов")
     running = process_running()
 
-    with st.container(border=True):
-        st.markdown("##### 📨 Отклики")
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            limit = st.number_input("Лимит откликов", min_value=1, max_value=50, value=5)
-        with c2:
-            min_delay = st.number_input("Минимальная пауза, мин", min_value=0, max_value=60, value=5)
-        with c3:
-            max_delay = st.number_input("Максимальная пауза, мин", min_value=0, max_value=60, value=10)
-        if st.button("Запустить отправку откликов", disabled=running, type="primary"):
-            start_script(
-                "Отклики (executor)",
-                "hh_executor.py",
-                (
-                    "--headless",
-                    "--limit", str(limit),
-                    "--min-delay", str(min_delay * 60),
-                    "--max-delay", str(max_delay * 60),
-                ),
+    actions = [
+        "Отправить отклики",
+        "Сгенерировать письма",
+        "Обновить список активных вакансий",
+        "Обновить 10 резюме на hh.ru",
+    ]
+    action = st.selectbox("Действие", actions, help="За один раз работает только одно действие.")
+
+    args = ()
+    script = ""
+    label = ""
+    start_disabled = running
+
+    with st.expander("Настройки", expanded=False):
+        if action == "Отправить отклики":
+            script = "hh_executor.py"
+            label = "Отклики (executor)"
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                limit = st.number_input("Лимит откликов", min_value=1, max_value=50, value=5)
+            with c2:
+                min_delay = st.number_input("Минимальная пауза, мин", min_value=0, max_value=60, value=5)
+            with c3:
+                max_delay = st.number_input("Максимальная пауза, мин", min_value=0, max_value=60, value=10)
+            args = (
+                "--headless", "--limit", str(limit),
+                "--min-delay", str(min_delay * 60),
+                "--max-delay", str(max_delay * 60),
             )
-            st.toast("Отклики запущены. Смотрите вкладку «Лог запуска».", icon="🚀")
-            st.rerun()
 
-    with st.container(border=True):
-        st.markdown("##### ✍️ Письма")
-        source = st.radio(
-            "Источник вакансий",
-            ["Только активные", "Все проанализированные"],
-            horizontal=True,
-            help="Активные — после проверки через Playwright: без архива и уже отправленных.",
-        )
-        if ACTIVE_CANDIDATES_FILE.exists():
-            active_count = len(read_json(ACTIVE_CANDIDATES_FILE, []) or [])
-            st.caption(f"В списке активных: {active_count} вакансий")
-        else:
-            st.warning("Список активных ещё не создан — нажмите «Обновить список активных».")
-
-        c1, c2 = st.columns([2, 1])
-        with c1:
+        elif action == "Сгенерировать письма":
+            script = "hh_writer.py"
+            label = "Генерация писем (writer)"
+            source = st.radio(
+                "Источник вакансий",
+                ["Только активные", "Все проанализированные"],
+                horizontal=True,
+            )
+            if ACTIVE_CANDIDATES_FILE.exists():
+                active_count = len(read_json(ACTIVE_CANDIDATES_FILE, []) or [])
+                st.caption(f"В списке активных: {active_count} вакансий")
+            else:
+                st.warning("Список активных ещё не создан — сначала обновите его.")
             letter_limit = st.number_input(
                 "Сколько писем сгенерировать", min_value=1, max_value=50, value=10
             )
-        with c2:
-            st.write("")
-            if st.button("Обновить список активных", disabled=running):
-                start_script(
-                    "Отбор активных вакансий",
-                    "hh_active_filter.py",
-                    ("--headless", "--top", "100"),
-                )
-                st.toast("Проверка вакансий запущена. Это займёт несколько минут.", icon="🔍")
-                st.rerun()
+            src = ACTIVE_CANDIDATES_FILE if source == "Только активные" else ANALYZED_FILE
+            args = ("--input", str(src), "--limit", str(letter_limit), "--min-score", "0")
+            if source == "Только активные" and not ACTIVE_CANDIDATES_FILE.exists():
+                start_disabled = True
 
-        use_active = source == "Только активные"
-        if st.button(
-            "Сгенерировать письма",
-            disabled=running or (use_active and not ACTIVE_CANDIDATES_FILE.exists()),
-            type="primary",
-        ):
-            src = ACTIVE_CANDIDATES_FILE if use_active else ANALYZED_FILE
-            start_script(
-                "Генерация писем (writer)",
-                "hh_writer.py",
-                ("--input", str(src), "--limit", str(letter_limit), "--min-score", "0"),
-            )
-            st.toast("Генерация писем запущена.", icon="✍️")
-            st.rerun()
+        elif action == "Обновить список активных вакансий":
+            script = "hh_active_filter.py"
+            label = "Отбор активных вакансий"
+            top = st.number_input("Проверить вакансий сверху", min_value=10, max_value=300, value=100)
+            args = ("--headless", "--top", str(top))
 
-    with st.container(border=True):
-        st.markdown("##### 📝 Резюме на hh.ru")
-        st.caption("Перезапишет «О себе», навыки и должности у всех 10 резюме. Займёт около 12 минут.")
-        if st.button("Обновить тексты 10 резюме", disabled=running):
-            start_script(
-                "Обновление резюме (filler)",
-                "hh_resume_filler.py",
-                ("--all", "--update", "--headless"),
-            )
-            st.toast("Обновление резюме запущено.", icon="📝")
-            st.rerun()
+        else:
+            script = "hh_resume_filler.py"
+            label = "Обновление резюме (filler)"
+            st.caption("Перезапишет «О себе», навыки и должности у всех 10 резюме. Займёт около 12 минут.")
+            args = ("--all", "--update", "--headless")
 
-    if running and st.button("Остановить текущий процесс"):
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        start = st.button("▶️ Запустить", type="primary", width="stretch", disabled=start_disabled)
+    with c2:
+        stop = st.button("⏹ Остановить", width="stretch", disabled=not running)
+
+    if start and script:
+        start_script(label, script, args)
+        st.toast(f"Запущено: {action}. Лог — во вкладке «📜 Лог запуска».", icon="🚀")
+        st.rerun()
+
+    if stop:
         stop_agent()
         st.toast("Процесс остановлен.", icon="🛑")
         st.rerun()
