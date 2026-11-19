@@ -12,6 +12,7 @@ interview_prep/
 vacancies.json
 analyzed_vacancies.json
 cover_letters.json
+active_candidates.json
 sent_log.json
 manual_queue.json
 executor_screenshots

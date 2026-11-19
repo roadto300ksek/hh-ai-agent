@@ -10,6 +10,7 @@ import streamlit as st
 from database import DB_PATH, get_today_sent_count, init_db
 from hh_resume_selector import choose_for_vacancy
 from paths import (
+    ACTIVE_CANDIDATES_FILE,
     ANALYZED_FILE,
     BASE_DIR,
     COVER_LETTERS_FILE,
@@ -406,12 +407,45 @@ with tab5:
 
     with st.container(border=True):
         st.markdown("##### ✍️ Письма")
-        letter_limit = st.number_input("Сколько писем сгенерировать", min_value=1, max_value=50, value=10)
-        if st.button("Сгенерировать письма", disabled=running):
+        source = st.radio(
+            "Источник вакансий",
+            ["Только активные", "Все проанализированные"],
+            horizontal=True,
+            help="Активные — после проверки через Playwright: без архива и уже отправленных.",
+        )
+        if ACTIVE_CANDIDATES_FILE.exists():
+            active_count = len(read_json(ACTIVE_CANDIDATES_FILE, []) or [])
+            st.caption(f"В списке активных: {active_count} вакансий")
+        else:
+            st.warning("Список активных ещё не создан — нажмите «Обновить список активных».")
+
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            letter_limit = st.number_input(
+                "Сколько писем сгенерировать", min_value=1, max_value=50, value=10
+            )
+        with c2:
+            st.write("")
+            if st.button("Обновить список активных", disabled=running):
+                start_script(
+                    "Отбор активных вакансий",
+                    "hh_active_filter.py",
+                    ("--headless", "--top", "100"),
+                )
+                st.toast("Проверка вакансий запущена. Это займёт несколько минут.", icon="🔍")
+                st.rerun()
+
+        use_active = source == "Только активные"
+        if st.button(
+            "Сгенерировать письма",
+            disabled=running or (use_active and not ACTIVE_CANDIDATES_FILE.exists()),
+            type="primary",
+        ):
+            src = ACTIVE_CANDIDATES_FILE if use_active else ANALYZED_FILE
             start_script(
                 "Генерация писем (writer)",
                 "hh_writer.py",
-                ("--input", str(ANALYZED_FILE), "--limit", str(letter_limit), "--min-score", "0"),
+                ("--input", str(src), "--limit", str(letter_limit), "--min-score", "0"),
             )
             st.toast("Генерация писем запущена.", icon="✍️")
             st.rerun()

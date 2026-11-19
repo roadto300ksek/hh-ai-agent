@@ -28,7 +28,9 @@
 
 Полезные ручные режимы:
 
-* `python hh_writer.py --input active.json --limit 20 --min-score 0` — писать письма по заранее отобранному файлу вакансий (например, после проверки, что вакансии не в архиве).
+* `python hh_active_filter.py --headless --top 100` — проверить вакансии через Playwright и сохранить только активные в `active_candidates.json` (исключает архив, уже отправленные и вакансии без кнопки отклика).
+* `python hh_writer.py --input active_candidates.json --limit 20 --min-score 0` — писать письма по заранее отобранному списку вакансий.
+* `python hh_writer.py --input active.json --limit 20 --min-score 0` — писать письма по произвольному файлу вакансий.
 * `python hh_executor.py --headless --limit 10 --min-delay 90 --max-delay 180` — отправить пачку с короткими паузами. Значения по умолчанию: 5–15 минут между откликами; те же параметры есть в дашборде.
 
 ## 📄 Data-Driven резюме (v2.0)
