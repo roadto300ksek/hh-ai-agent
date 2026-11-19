@@ -1,4 +1,6 @@
+import argparse
 import json
+from pathlib import Path
 
 from config import CANDIDATE_INFO, ask_llm
 from database import get_manual_queue, get_sent_links, init_db
@@ -125,11 +127,18 @@ def generate_letter(vacancy):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Генератор сопроводительных писем")
+    parser.add_argument("--input", help="файл с вакансиями вместо analyzed_vacancies.json")
+    parser.add_argument("--limit", type=int, default=TOP_N, help="сколько писем сгенерировать")
+    parser.add_argument("--min-score", type=int, default=70, help="минимальный скор вакансии")
+    args = parser.parse_args()
+
     init_db()
 
-    analyzed = try_read_json(ANALYZED_FILE, [])
+    source = Path(args.input) if args.input else ANALYZED_FILE
+    analyzed = try_read_json(source, [])
     if not isinstance(analyzed, list):
-        print("❌ analyzed_vacancies.json имеет неверный формат. Запусти hh_analyzer.py")
+        print(f"❌ Файл {source.name} имеет неверный формат. Запусти hh_analyzer.py")
         return
 
     # Отправленные берем из SQLite, а не из устаревшего sent_log.json
@@ -145,7 +154,7 @@ def main():
         print(f"📝 Неотправленных писем с прошлого запуска: {len(pending)}")
 
     busy_links = already_sent | manual_links | {item["link"] for item in pending}
-    top_vacancies = select_new(analyzed, busy_links)
+    top_vacancies = select_new(analyzed, busy_links, limit=args.limit, min_score=args.min_score)
 
     if not top_vacancies and not pending:
         print("🎉 Нет новых вакансий для генерации писем. Все топовые уже отработаны.")

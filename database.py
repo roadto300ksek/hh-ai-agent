@@ -37,9 +37,16 @@ def init_db(db_path=DB_PATH):
                 company TEXT,
                 score INTEGER,
                 sent_at TEXT,
-                status TEXT
+                status TEXT,
+                resume_id TEXT
             )
         ''')
+        # Миграция старой базы: колонка появилась вместе с выбором резюме.
+        columns = {
+            row[1] for row in cursor.execute("PRAGMA table_info(sent_applications)")
+        }
+        if "resume_id" not in columns:
+            cursor.execute("ALTER TABLE sent_applications ADD COLUMN resume_id TEXT")
         # Таблица для ручной очереди (где требуются ответы)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS manual_queue (
@@ -75,16 +82,20 @@ def get_today_sent_count(db_path=DB_PATH):
         return cursor.fetchone()[0]
 
 
-def add_sent_application(link, title, company, score, status="sent", db_path=DB_PATH):
+def add_sent_application(
+    link, title, company, score, status="sent", resume_id=None, db_path=DB_PATH
+):
     """Записывает отклик. Статус 'sent' имеет приоритет над archived/already."""
     with get_conn(db_path) as conn:
         conn.execute('''
-            INSERT INTO sent_applications (link, title, company, score, sent_at, status)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO sent_applications
+                (link, title, company, score, sent_at, status, resume_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(link) DO UPDATE SET
                 title = excluded.title,
                 company = excluded.company,
                 score = excluded.score,
+                resume_id = COALESCE(excluded.resume_id, sent_applications.resume_id),
                 status = CASE
                     WHEN excluded.status = 'sent' THEN 'sent'
                     ELSE sent_applications.status
@@ -93,7 +104,9 @@ def add_sent_application(link, title, company, score, status="sent", db_path=DB_
                     WHEN excluded.status = 'sent' THEN excluded.sent_at
                     ELSE sent_applications.sent_at
                 END
-        ''', (link, title, company, score, datetime.now().isoformat(), status))
+        ''', (
+            link, title, company, score, datetime.now().isoformat(), status, resume_id,
+        ))
 
 
 def get_manual_queue(db_path=DB_PATH):

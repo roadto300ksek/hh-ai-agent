@@ -1,3 +1,4 @@
+import argparse
 import json
 import random
 import sys
@@ -22,6 +23,7 @@ from database import (
     remove_from_manual_queue,
 )
 from hh_browser import launch_context
+from hh_resume_selector import choose_for_vacancy
 from paths import COVER_LETTERS_FILE, SCREENSHOT_DIR
 from utils import configure_stdout, has_visible, log, page_is_closed, try_read_json
 
@@ -59,6 +61,7 @@ TASK_QUESTION_QA = '[data-qa="task-question"]'
 RESPONSE_LETTER_QA = '[data-qa="vacancy-response-popup-form-letter-input"]'
 RESPONSE_SUBMIT_QA = '[data-qa="vacancy-response-submit-popup"]'
 RESPONSE_SUCCESS_QA = '[data-qa="responded-success-attach-cover-letter"]'
+RESUME_TRIGGER_QA = '[data-qa="resume-title"]'
 
 ERROR_RESULTS = {
     "no_button",
@@ -83,7 +86,18 @@ def random_delay():
 def check_captcha(page):
     if "captcha" in page.url.lower():
         return True
-    return has_visible(page, 'iframe[src*="captcha"]')
+    if has_visible(page, 'iframe[src*="captcha"]'):
+        return True
+    # hh.ru может показать капчу в модалке прямо после нажатия «Откликнуться».
+    # Тогда отклик НЕ уходит, а агент видит лишь отсутствие подтверждения.
+    for marker in (
+        'text=Пройдите капчу',
+        'text=Текст с картинки',
+        'text=Подтвердите, что вы не робот',
+    ):
+        if has_visible(page, marker):
+            return True
+    return False
 
 
 def check_auth_on_main(page):
@@ -430,6 +444,42 @@ def normalize_title(title):
     """Убирает различия в тире/пунктуации, чтобы сравнить название вакансии."""
     text = normalize_text(title).lower()
     return "".join(ch for ch in text if ch.isalnum() or ch == " ").strip()
+
+
+def select_resume(page, choice):
+    """Выбирает нужное резюме в форме отклика. True, если выбрано именно оно."""
+    trigger = page.locator(RESUME_TRIGGER_QA).first
+    if trigger.count() == 0:
+        log("   ⚠️ На странице отклика нет выбора резюме.")
+        return False
+    if not choice or not choice.hash:
+        return False
+
+    expected = normalize_title(choice.title)
+    current = trigger.inner_text(timeout=3000).strip()
+    if normalize_title(current) == expected:
+        log(f"   🗂 Резюме уже выбрано: {current}")
+        return True
+
+    option = page.locator(f'[data-qa="magritte-select-option-{choice.hash}"]')
+    if option.count() == 0:
+        trigger.click()
+        page.wait_for_timeout(1500)
+        option = page.locator(f'[data-qa="magritte-select-option-{choice.hash}"]')
+    if option.count() == 0:
+        log(f"   ⚠️ В списке нет резюме {choice.resume_id} ({choice.hash[:8]}).")
+        return False
+
+    option.first.click()
+    page.wait_for_timeout(1500)
+
+    selected = trigger.inner_text(timeout=3000).strip()
+    if normalize_title(selected) == expected:
+        log(f"   🗂 Резюме выбрано: {selected}")
+        return True
+
+    log(f"   ⚠️ После выбора показано «{selected}», ожидалось «{choice.title}».")
+    return False
 
 
 def get_live_vacancy_title(page):
@@ -992,13 +1042,30 @@ def respond_to_vacancy(page, vacancy):
     description = get_vacancy_description(page)
     salary = get_vacancy_salary(page)
 
+    # Подбираем резюме под вакансию: детерминированно, без LLM.
+    resume_choice = None
+    try:
+        resume_choice = choose_for_vacancy(
+            {"title": live_title or title, "description": description}
+        )
+        log(
+            f"   🗂 Резюме под вакансию: {resume_choice.resume_id} "
+            f"({resume_choice.title})"
+        )
+        log(f"      причина: {resume_choice.reason}")
+    except Exception as e:
+        log(f"   ⚠️ Не удалось выбрать резюме: {e}")
+    resume_id = resume_choice.resume_id if resume_choice else None
+
     # --- МЫ УЖЕ ОТКЛИКАЛИСЬ РАНЕЕ? ---
     if page.locator(CHAT_RESPONSE_BUTTON_QA).count() > 0 or has_visible(
         page, 'a:has-text("Перейти в чат")'
     ):
         log("   ⏭️  Уже откликались ранее. Пробую прикрепить письмо...")
         if letter and send_letter_in_chat(page, letter, title, company):
-            add_sent_application(link, title, company, score, status="sent")
+            add_sent_application(
+                link, title, company, score, status="sent", resume_id=resume_id
+            )
             remove_from_manual_queue(link)
             log("   ✅ Письмо прикреплено к ранее отправленному отклику.")
             return "sent"
@@ -1035,10 +1102,16 @@ def respond_to_vacancy(page, vacancy):
         if (
             check_questions(page)
             or page.locator(RESPONSE_LETTER_QA).count() > 0
+            or page.locator(RESUME_TRIGGER_QA).count() > 0
             or response_is_sent(page)
         ):
             break
         page.wait_for_timeout(500)
+
+    # --- ВЫБОР РЕЗЮМЕ ПОД ВАКАНСИЮ ---
+    if resume_choice and page.locator(RESUME_TRIGGER_QA).count() > 0:
+        select_resume(page, resume_choice)
+        page.wait_for_timeout(1000)
 
     # --- ВОПРОСЫ РАБОТОДАТЕЛЯ ---
     if check_questions(page):
@@ -1053,12 +1126,16 @@ def respond_to_vacancy(page, vacancy):
             if letter and response_is_sent(page):
                 log("   💬 Отклик уже ушёл, прикрепляю письмо...")
                 if send_letter_in_chat(page, letter, title, company):
-                    add_sent_application(link, title, company, score, status="sent")
+                    add_sent_application(
+                        link, title, company, score, status="sent", resume_id=resume_id
+                    )
                     add_to_manual_queue(
                         link, title, company, "Отклик отправлен, но вопросы без ответов"
                     )
                     return "sent"
-                add_sent_application(link, title, company, score, status="no_letter")
+                add_sent_application(
+                    link, title, company, score, status="no_letter", resume_id=resume_id
+                )
             add_to_manual_queue(
                 link, title, company, "Не удалось ответить на вопросы работодателя"
             )
@@ -1068,11 +1145,23 @@ def respond_to_vacancy(page, vacancy):
     # --- КЛАССИЧЕСКИЙ ПОПАП С ПОЛЕМ ПИСЬМА ---
     letter_field = page.locator('[data-qa="vacancy-response-popup-form-letter-input"]').first
     if letter_field.count() == 0:
-        toggle_btn = page.locator('[data-qa="vacancy-response-letter-toggle"]').first
-        if toggle_btn.count() > 0:
-            toggle_btn.click()
+        # У модалки кнопка «Добавить сопроводительное», у отдельной страницы
+        # отклика — vacancy-response-letter-toggle. Пробуем оба варианта.
+        for toggle_selector in (
+            '[data-qa="add-cover-letter"]',
+            '[data-qa="vacancy-response-letter-toggle"]',
+        ):
+            toggle_btn = page.locator(toggle_selector).first
+            if toggle_btn.count() == 0 or not toggle_btn.is_visible():
+                continue
+            try:
+                toggle_btn.click()
+            except Exception:
+                continue
             page.wait_for_timeout(1500)
-            letter_field = page.locator('[data-qa="vacancy-response-popup-form-letter-input"]').first
+            letter_field = page.locator(RESPONSE_LETTER_QA).first
+            if letter_field.count() > 0:
+                break
 
     if letter_field.count() > 0:
         log("   📋 Классический попап. Вставляю письмо...")
@@ -1103,6 +1192,10 @@ def respond_to_vacancy(page, vacancy):
             log(f"   ⚠️ Не удалось нажать 'Отправить': {e}")
             return "click_error"
 
+        if check_captcha(page):
+            log("   🚨 Капча при отправке отклика. Останавливаюсь.")
+            return "captcha"
+
         # Не считаем отклик отправленным, если hh.ru показал ошибку
         if check_send_error(page):
             log("   ❌ hh.ru сообщил об ошибке отправки.")
@@ -1115,19 +1208,30 @@ def respond_to_vacancy(page, vacancy):
             return "no_submit"
 
         log("   ✅ ОТКЛИК ОТПРАВЛЕН (попап) с письмом!")
-        add_sent_application(link, title, company, score, status="sent")
+        add_sent_application(
+            link, title, company, score, status="sent", resume_id=resume_id
+        )
+        remove_from_manual_queue(link)
         return "sent"
 
     # --- НОВЫЙ ИНТЕРФЕЙС: отклик уходит сразу, письмо добавляется в чате ---
+    if check_captcha(page):
+        log("   🚨 Капча при отправке отклика. Останавливаюсь.")
+        return "captcha"
     log("   ⏳ Жду подтверждения отклика...")
     if wait_for_response_marker(page):
         log("   💬 Отклик отправлен. Прикрепляю письмо в чате...")
         if send_letter_in_chat(page, letter, title, company):
-            add_sent_application(link, title, company, score, status="sent")
+            add_sent_application(
+                link, title, company, score, status="sent", resume_id=resume_id
+            )
+            remove_from_manual_queue(link)
             return "sent"
 
         log("   ⚠️ Отклик ушёл, но письмо не прикрепилось. В ручную очередь.")
-        add_sent_application(link, title, company, score, status="no_letter")
+        add_sent_application(
+            link, title, company, score, status="no_letter", resume_id=resume_id
+        )
         add_to_manual_queue(
             link, title, company, "Отклик отправлен без письма — прикрепи вручную в чате"
         )
@@ -1225,6 +1329,19 @@ def retry_failed_letters(page, cover_letters):
 
 
 def main():
+    global HEADLESS, MIN_DELAY_SEC, MAX_DELAY_SEC
+
+    parser = argparse.ArgumentParser(description="Отклики на hh.ru с автовыбором резюме")
+    parser.add_argument("--headless", action="store_true", help="без окна браузера")
+    parser.add_argument("--limit", type=int, default=0, help="максимум откликов за запуск")
+    parser.add_argument("--min-delay", type=int, default=MIN_DELAY_SEC)
+    parser.add_argument("--max-delay", type=int, default=MAX_DELAY_SEC)
+    args = parser.parse_args()
+
+    HEADLESS = args.headless
+    MIN_DELAY_SEC = args.min_delay
+    MAX_DELAY_SEC = max(args.min_delay, args.max_delay)
+
     init_db()
 
     cover_letters = try_read_json(COVER_LETTERS_FILE, None)
@@ -1251,7 +1368,8 @@ def main():
         log("🛑 Дневной лимит исчерпан. Возвращайся завтра.")
         return
 
-    to_send = build_queue(cover_letters, already_sent, remaining)
+    queue_limit = remaining if args.limit <= 0 else min(remaining, args.limit)
+    to_send = build_queue(cover_letters, already_sent, queue_limit)
     if not to_send and not retry_links:
         log("🎉 Все письма из cover_letters.json уже обработаны.")
         return

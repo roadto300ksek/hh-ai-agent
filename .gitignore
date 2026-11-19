@@ -5,6 +5,9 @@ hh_state.json
 # Личные данные кандидата
 candidate_local.py
 
+# Подготовка к собеседованию (локально, не в публичном репозитории)
+interview_prep/
+
 # Рабочие данные (генерируются скриптами)
 vacancies.json
 analyzed_vacancies.json
@@ -16,6 +19,15 @@ debug_page.html
 debug_screenshot.png
 run_all.log
 *.log
+
+# Data-Driven резюме (v2.0): содержат личные данные и рыночные выгрузки
+vacancy_details.json
+market_trends.json
+user_real_profile.json
+resume_targets.json
+generated_resumes.json
+resumes.md
+hh_created_resumes.json
 
 # Python
 __pycache__/
