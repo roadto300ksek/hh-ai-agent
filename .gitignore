@@ -13,6 +13,7 @@ vacancies.json
 analyzed_vacancies.json
 cover_letters.json
 active_candidates.json
+auto_status.json
 sent_log.json
 manual_queue.json
 executor_screenshots

@@ -12,6 +12,7 @@ from hh_resume_selector import choose_for_vacancy
 from paths import (
     ACTIVE_CANDIDATES_FILE,
     ANALYZED_FILE,
+    AUTO_STATUS_FILE,
     BASE_DIR,
     COVER_LETTERS_FILE,
     CREATED_RESUMES_FILE,
@@ -139,12 +140,24 @@ def resume_hash_map():
 
 @st.fragment(run_every="2s")
 def render_process_status():
-    """Живой статус единственного запущенного из дашборда процесса."""
-    if process_running():
-        label = st.session_state.get("run_label", "процесс")
-        st.info(f"⏳ Работает: {label}")
+    """Живой статус полного цикла: текущий шаг из auto_status.json."""
+    running = process_running()
+    data = read_json(AUTO_STATUS_FILE, {}) or {}
+    stage = data.get("stage", 0)
+    total = data.get("total", 5)
+    label = data.get("label", "")
+    state = data.get("state", "")
+
+    if running:
+        st.info(f"⏳ Шаг {stage}/{total}: {label}")
+    elif state == "done":
+        st.success("✅ Полный цикл завершён")
+    elif state in ("error", "skipped"):
+        st.warning(f"⏹ {label}")
     elif st.session_state.get("run_proc") is not None:
-        st.success("✅ Готово к запуску")
+        st.info("⏹ Цикл остановлен")
+    else:
+        st.success("🟢 Готово к запуску")
 
 
 # --- Боковая панель (Управление) ---
@@ -172,7 +185,7 @@ st.markdown(
     """
     <div class="hero">
       <h1>🤖 Панель управления AI-агентом</h1>
-      <p>Поиск вакансий, честные резюме и отклики под присмотром. Управление — вкладка «🚀 Запуск».</p>
+      <p>Одна кнопка запускает полный цикл: вакансии, письма, отклики. Всё остальное — для просмотра.</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -372,81 +385,24 @@ with tab4:
         st.success("Ручная очередь пуста! Агент справляется сам.")
 
 with tab5:
-    st.subheader("Запуск агентов")
+    st.subheader("Автоматический цикл")
+    st.caption(
+        "Одна кнопка: сбор вакансий → анализ → отбор активных → письма → отклики. "
+        "Настройки уже заданы: 10 писем, 5 откликов, паузы 5–10 минут."
+    )
     running = process_running()
-
-    actions = [
-        "Отправить отклики",
-        "Сгенерировать письма",
-        "Обновить список активных вакансий",
-        "Обновить 10 резюме на hh.ru",
-    ]
-    action = st.selectbox("Действие", actions, help="За один раз работает только одно действие.")
-
-    args = ()
-    script = ""
-    label = ""
-    start_disabled = running
-
-    with st.expander("Настройки", expanded=False):
-        if action == "Отправить отклики":
-            script = "hh_executor.py"
-            label = "Отклики (executor)"
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                limit = st.number_input("Лимит откликов", min_value=1, max_value=50, value=5)
-            with c2:
-                min_delay = st.number_input("Минимальная пауза, мин", min_value=0, max_value=60, value=5)
-            with c3:
-                max_delay = st.number_input("Максимальная пауза, мин", min_value=0, max_value=60, value=10)
-            args = (
-                "--headless", "--limit", str(limit),
-                "--min-delay", str(min_delay * 60),
-                "--max-delay", str(max_delay * 60),
-            )
-
-        elif action == "Сгенерировать письма":
-            script = "hh_writer.py"
-            label = "Генерация писем (writer)"
-            source = st.radio(
-                "Источник вакансий",
-                ["Только активные", "Все проанализированные"],
-                horizontal=True,
-            )
-            if ACTIVE_CANDIDATES_FILE.exists():
-                active_count = len(read_json(ACTIVE_CANDIDATES_FILE, []) or [])
-                st.caption(f"В списке активных: {active_count} вакансий")
-            else:
-                st.warning("Список активных ещё не создан — сначала обновите его.")
-            letter_limit = st.number_input(
-                "Сколько писем сгенерировать", min_value=1, max_value=50, value=10
-            )
-            src = ACTIVE_CANDIDATES_FILE if source == "Только активные" else ANALYZED_FILE
-            args = ("--input", str(src), "--limit", str(letter_limit), "--min-score", "0")
-            if source == "Только активные" and not ACTIVE_CANDIDATES_FILE.exists():
-                start_disabled = True
-
-        elif action == "Обновить список активных вакансий":
-            script = "hh_active_filter.py"
-            label = "Отбор активных вакансий"
-            top = st.number_input("Проверить вакансий сверху", min_value=10, max_value=300, value=100)
-            args = ("--headless", "--top", str(top))
-
-        else:
-            script = "hh_resume_filler.py"
-            label = "Обновление резюме (filler)"
-            st.caption("Перезапишет «О себе», навыки и должности у всех 10 резюме. Займёт около 12 минут.")
-            args = ("--all", "--update", "--headless")
 
     c1, c2 = st.columns([3, 1])
     with c1:
-        start = st.button("▶️ Запустить", type="primary", width="stretch", disabled=start_disabled)
+        start = st.button(
+            "▶️ Запустить всё", type="primary", width="stretch", disabled=running
+        )
     with c2:
         stop = st.button("⏹ Остановить", width="stretch", disabled=not running)
 
-    if start and script:
-        start_script(label, script, args)
-        st.toast(f"Запущено: {action}. Лог — во вкладке «📜 Лог запуска».", icon="🚀")
+    if start:
+        start_script("Полный цикл", "hh_auto.py", ())
+        st.toast("Полный цикл запущен. Прогресс — в боковой панели и в логе.", icon="🚀")
         st.rerun()
 
     if stop:

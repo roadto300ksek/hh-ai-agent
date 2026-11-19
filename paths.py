@@ -10,6 +10,7 @@ VACANCIES_FILE = BASE_DIR / "vacancies.json"
 ANALYZED_FILE = BASE_DIR / "analyzed_vacancies.json"
 COVER_LETTERS_FILE = BASE_DIR / "cover_letters.json"
 ACTIVE_CANDIDATES_FILE = BASE_DIR / "active_candidates.json"
+AUTO_STATUS_FILE = BASE_DIR / "auto_status.json"
 
 # ==== Data-Driven резюме (v2.0) ====
 VACANCY_DETAILS_FILE = BASE_DIR / "vacancy_details.json"
