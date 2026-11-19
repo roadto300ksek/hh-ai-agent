@@ -21,6 +21,33 @@ from utils import read_json
 
 st.set_page_config(page_title="HH AI-Agent", page_icon="🤖", layout="wide")
 
+st.markdown(
+    """
+    <style>
+      [data-testid="stAppDeployButton"] { display: none; }
+      .block-container { padding-top: 2rem; max-width: 1440px; }
+      .hero {
+        background: linear-gradient(120deg, #111827 0%, #312e81 60%, #4f46e5 100%);
+        color: white; padding: 26px 32px; border-radius: 18px; margin-bottom: 22px;
+        box-shadow: 0 10px 28px rgba(17, 24, 39, .18);
+      }
+      .hero h1 { margin: 0; font-size: 32px; letter-spacing: -.5px; }
+      .hero p { margin: 8px 0 0; font-size: 15px; opacity: .85; }
+      [data-testid="stMetric"] {
+        background: #fff; border: 1px solid #e5e7eb; border-radius: 14px;
+        padding: 14px 18px; box-shadow: 0 2px 10px rgba(15, 23, 42, .05);
+      }
+      [data-testid="stTabs"] [role="tab"] { border-radius: 10px 10px 0 0; font-weight: 600; }
+      [data-testid="stTabs"] [role="tab"][aria-selected="true"] { background: #eef2ff; color: #3730a3; }
+      div[data-testid="stDataFrame"] { border-radius: 12px; overflow: hidden; border: 1px solid #e5e7eb; }
+      section[data-testid="stSidebar"] { background: #f8fafc; border-right: 1px solid #e5e7eb; }
+      .stButton > button { border-radius: 10px; }
+      .status-pill { padding: 3px 10px; border-radius: 999px; font-size: 13px; font-weight: 600; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 init_db()
 
 DASHBOARD_LOG = BASE_DIR / "dashboard.log"
@@ -147,8 +174,15 @@ with st.sidebar:
         st.warning("Сначала запусти `python hh_login.py` и войди в аккаунт.")
 
 # --- Основная часть (Дашборд) ---
-st.title("🤖 Панель управления AI-агентом")
-st.markdown("Автоматизация поиска и отклика на вакансии HeadHunter")
+st.markdown(
+    """
+    <div class="hero">
+      <h1>🤖 Панель управления AI-агентом</h1>
+      <p>Поиск вакансий, честные резюме и отклики под присмотром. Управление — вкладка «⚙️ Ручной запуск».</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 try:
     sent_df = get_db_data("SELECT * FROM sent_applications ORDER BY sent_at DESC")
@@ -209,37 +243,52 @@ with tab1:
         if "sent_at" in display.columns:
             display[" sent_dt"] = pd.to_datetime(display["sent_at"], errors="coerce")
 
-        period = st.selectbox("Период", ["Все", "Сегодня", "Последние 7 дней"], index=0)
-        if period == "Сегодня":
-            display = display[
-                display[" sent_dt"] >= pd.Timestamp(datetime.now().date())
-            ]
-        elif period == "Последние 7 дней":
-            display = display[
-                display[" sent_dt"] >= pd.Timestamp.now() - timedelta(days=7)
-            ]
+        with st.container(border=True):
+            st.caption("Фильтры")
+            period = st.selectbox("Период", ["Все", "Сегодня", "Последние 7 дней"], index=0)
+            if period == "Сегодня":
+                display = display[
+                    display[" sent_dt"] >= pd.Timestamp(datetime.now().date())
+                ]
+            elif period == "Последние 7 дней":
+                display = display[
+                    display[" sent_dt"] >= pd.Timestamp.now() - timedelta(days=7)
+                ]
 
-        statuses = st.multiselect(
-            "Статус",
-            options=sorted(display["status"].dropna().unique().tolist()),
-            default=[],
-        )
-        if statuses:
-            display = display[display["status"].isin(statuses)]
-
-        query = st.text_input("Поиск по вакансии или компании")
-        if query:
-            mask = (
-                display.get("title", pd.Series(dtype=str)).fillna("").str.contains(query, case=False)
-                | display.get("company", pd.Series(dtype=str)).fillna("").str.contains(query, case=False)
+            statuses = st.multiselect(
+                "Статус",
+                options=sorted(display["status"].dropna().unique().tolist()),
+                default=[],
             )
-            display = display[mask]
+            if statuses:
+                display = display[display["status"].isin(statuses)]
+
+            query = st.text_input("Поиск по вакансии или компании")
+            if query:
+                mask = (
+                    display.get("title", pd.Series(dtype=str)).fillna("").str.contains(query, case=False)
+                    | display.get("company", pd.Series(dtype=str)).fillna("").str.contains(query, case=False)
+                )
+                display = display[mask]
 
         display = display.rename(columns={
             "title": "Вакансия", "company": "Компания",
             "score": "Оценка ИИ", "sent_at": "Время",
             "status": "Статус", "link": "Ссылка",
         })
+        status_labels = {
+            "sent": "✅ отправлено",
+            "no_letter": "⚠️ без письма",
+            "archived": "⏭️ архив",
+            "manual_questions": "✋ вопросы",
+            "chat_failed": "⚠️ чат",
+            "send_error": "❌ ошибка",
+            "no_submit": "❌ не отправлено",
+        }
+        if "Статус" in display.columns:
+            display["Статус"] = display["Статус"].map(
+                lambda value: status_labels.get(value, value)
+            )
         columns = [
             column for column in
             ["Вакансия", "Компания", "Оценка ИИ", "Статус", "Резюме", "Время", "Ссылка"]
@@ -262,7 +311,7 @@ with tab2:
                 "Вакансия": item.get("title", ""),
                 "Компания": item.get("company", ""),
                 "Оценка": item.get("score", 0),
-                "Статус": "отправлено" if link in sent_links else "в очереди",
+                "Статус": "✅ отправлено" if link in sent_links else "🕓 в очереди",
                 "Ссылка": link,
                 "Письмо": item.get("cover_letter", ""),
             })
@@ -332,44 +381,52 @@ with tab5:
     st.subheader("Ручной запуск агентов")
     running = process_running()
 
-    st.markdown("##### Отклики")
-    limit = st.number_input("Лимит откликов", min_value=1, max_value=50, value=5)
-    min_delay = st.number_input("Минимальная пауза, мин", min_value=0, max_value=60, value=5)
-    max_delay = st.number_input("Максимальная пауза, мин", min_value=0, max_value=60, value=10)
-    if st.button("Запустить отправку откликов", disabled=running, type="primary"):
-        start_script(
-            "Откликки (executor)",
-            "hh_executor.py",
-            (
-                "--headless",
-                "--limit", str(limit),
-                "--min-delay", str(min_delay * 60),
-                "--max-delay", str(max_delay * 60),
-            ),
-        )
-        st.toast("Откликки запущены. Смотрите вкладку «Лог запуска».", icon="🚀")
-        st.rerun()
+    with st.container(border=True):
+        st.markdown("##### 📨 Отклики")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            limit = st.number_input("Лимит откликов", min_value=1, max_value=50, value=5)
+        with c2:
+            min_delay = st.number_input("Минимальная пауза, мин", min_value=0, max_value=60, value=5)
+        with c3:
+            max_delay = st.number_input("Максимальная пауза, мин", min_value=0, max_value=60, value=10)
+        if st.button("Запустить отправку откликов", disabled=running, type="primary"):
+            start_script(
+                "Отклики (executor)",
+                "hh_executor.py",
+                (
+                    "--headless",
+                    "--limit", str(limit),
+                    "--min-delay", str(min_delay * 60),
+                    "--max-delay", str(max_delay * 60),
+                ),
+            )
+            st.toast("Отклики запущены. Смотрите вкладку «Лог запуска».", icon="🚀")
+            st.rerun()
 
-    st.markdown("##### Письма")
-    letter_limit = st.number_input("Сколько писем сгенерировать", min_value=1, max_value=50, value=10)
-    if st.button("Сгенерировать письма", disabled=running):
-        start_script(
-            "Генерация писем (writer)",
-            "hh_writer.py",
-            ("--input", str(ANALYZED_FILE), "--limit", str(letter_limit), "--min-score", "0"),
-        )
-        st.toast("Генерация писем запущена.", icon="✍️")
-        st.rerun()
+    with st.container(border=True):
+        st.markdown("##### ✍️ Письма")
+        letter_limit = st.number_input("Сколько писем сгенерировать", min_value=1, max_value=50, value=10)
+        if st.button("Сгенерировать письма", disabled=running):
+            start_script(
+                "Генерация писем (writer)",
+                "hh_writer.py",
+                ("--input", str(ANALYZED_FILE), "--limit", str(letter_limit), "--min-score", "0"),
+            )
+            st.toast("Генерация писем запущена.", icon="✍️")
+            st.rerun()
 
-    st.markdown("##### Резюме на hh.ru")
-    if st.button("Обновить тексты 10 резюме", disabled=running):
-        start_script(
-            "Обновление резюме (filler)",
-            "hh_resume_filler.py",
-            ("--all", "--update", "--headless"),
-        )
-        st.toast("Обновление резюме запущено.", icon="📝")
-        st.rerun()
+    with st.container(border=True):
+        st.markdown("##### 📝 Резюме на hh.ru")
+        st.caption("Перезапишет «О себе», навыки и должности у всех 10 резюме. Займёт около 12 минут.")
+        if st.button("Обновить тексты 10 резюме", disabled=running):
+            start_script(
+                "Обновление резюме (filler)",
+                "hh_resume_filler.py",
+                ("--all", "--update", "--headless"),
+            )
+            st.toast("Обновление резюме запущено.", icon="📝")
+            st.rerun()
 
     if running and st.button("Остановить текущий процесс"):
         stop_agent()
