@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import database
+import hh_active_filter as active_filter
 import hh_executor
 import hh_resume_selector as selector
 
@@ -77,6 +78,23 @@ class TestResumeSelector(unittest.TestCase):
 
     def test_normalize_replaces_yo(self):
         self.assertEqual(selector.normalize("ПрИвЕт  ЁЖик"), "привет ежик")
+
+
+class TestOffProfileFilter(unittest.TestCase):
+    def test_default_markers(self):
+        self.assertTrue(
+            active_filter.is_off_profile(
+                "Стажер на позицию экономист-финансист с навыками работы с ИИ"
+            )
+        )
+        self.assertTrue(active_filter.is_off_profile("AI креатор видео"))
+        self.assertFalse(active_filter.is_off_profile("Python-разработчик (FastAPI)"))
+
+    def test_custom_markers_and_yo(self):
+        self.assertTrue(
+            active_filter.is_off_profile("Финансист", markers=("финансист",))
+        )
+        self.assertTrue(active_filter.is_off_profile("Маркетёлог", markers=("маркетелог",)))
 
 
 class TestCaptchaDetection(unittest.TestCase):

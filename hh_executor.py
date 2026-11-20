@@ -3,7 +3,7 @@ import json
 import random
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from playwright.sync_api import sync_playwright
 
@@ -75,7 +75,11 @@ ERROR_RESULTS = {
 
 def random_delay():
     delay = random.uniform(MIN_DELAY_SEC, MAX_DELAY_SEC)
-    log(f"⏳ Пауза {delay / 60:.1f} мин перед следующим откликом...")
+    next_time = datetime.now() + timedelta(seconds=delay)
+    log(
+        f"⏳ Пауза {delay / 60:.1f} мин. "
+        f"Следующий отклик примерно в {next_time:%H:%M}..."
+    )
     try:
         time.sleep(delay)
     except KeyboardInterrupt:

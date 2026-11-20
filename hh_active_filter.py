@@ -25,6 +25,23 @@ configure_stdout(line_buffering=True)
 
 BLOCK_MARKERS = ("запретил доступ", "hh.ru недоступен", "Пройдите капчу")
 
+# Вакансии, заведомо не подходящие под профиль Python-разработчика.
+OFF_PROFILE_MARKERS = (
+    "экономист", "финансист", "бухгалтер", "кассир",
+    "продаж", "sales", "маркетолог", "smm", "рекрут",
+    "преподаватель", "учитель", "тьютор", "педагог",
+    "юрист", "адвокат", "нотариус",
+    "водитель", "курьер", "грузчик", "уборщик", "охранник",
+    "повар", "официант", "бармен",
+    "дизайнер", "копирайтер", "контент-менеджер", "креатор", "видео",
+    "переводчик", "психолог", "врач", "медсестра",
+)
+
+
+def is_off_profile(title: str, markers=OFF_PROFILE_MARKERS) -> bool:
+    text = (title or "").lower().replace("ё", "е")
+    return any(marker in text for marker in markers)
+
 
 def load_vacancies(path: Path) -> list[dict]:
     data = read_json(path, [])
@@ -39,8 +56,18 @@ def main():
     parser.add_argument("--output", type=Path, default=ACTIVE_CANDIDATES_FILE)
     parser.add_argument("--top", type=int, default=50)
     parser.add_argument("--pause", type=float, default=2.5, help="пауза между страницами, сек")
+    parser.add_argument(
+        "--exclude", default="",
+        help="дополнительные слова в названии через запятую — такие вакансии пропускаются",
+    )
     parser.add_argument("--headless", action="store_true")
     args = parser.parse_args()
+
+    extra_markers = tuple(
+        item.strip().lower().replace("ё", "е")
+        for item in args.exclude.split(",") if item.strip()
+    )
+    markers = OFF_PROFILE_MARKERS + extra_markers
 
     init_db()
     sent = get_sent_links()
@@ -49,16 +76,20 @@ def main():
     vacancies = load_vacancies(args.input)
     seen = set()
     candidates = []
+    off_profile = 0
     for vacancy in vacancies:
         link = vacancy["link"]
         if link in sent or link in manual or link in seen:
+            continue
+        if is_off_profile(vacancy.get("title", ""), markers):
+            off_profile += 1
             continue
         seen.add(link)
         candidates.append(vacancy)
 
     candidates.sort(key=lambda v: v.get("score", 0), reverse=True)
     candidates = candidates[: args.top]
-    log(f"📊 Проверяю {len(candidates)} вакансий из {args.input.name}")
+    log(f"🚫 Не по профилю: {off_profile}. Проверяю {len(candidates)} вакансий из {args.input.name}")
 
     active = []
     statuses = {}
