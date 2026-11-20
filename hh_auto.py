@@ -17,6 +17,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from database import get_manual_queue, get_sent_links, init_db
 from paths import ACTIVE_CANDIDATES_FILE, AUTO_STATUS_FILE, BASE_DIR, COVER_LETTERS_FILE
 from utils import configure_stdout, log, read_json, write_json
 
@@ -67,26 +68,73 @@ def run_stage(script: str, args: tuple[str, ...]) -> bool:
     return True
 
 
-def has_items(path: Path) -> bool:
-    try:
-        data = read_json(path, [])
-    except Exception:
-        return False
-    return bool(data)
+def busy_links() -> set[str]:
+    """Вакансии, которые уже отправлены или ушли в ручную очередь."""
+    manual = {item["link"] for item in get_manual_queue() if item.get("link")}
+    return get_sent_links() | manual
+
+
+def pending_letters() -> list[dict]:
+    """Неотправленные письма с готовыми текстами."""
+    busy = busy_links()
+    data = read_json(COVER_LETTERS_FILE, []) or []
+    if not isinstance(data, list):
+        return []
+    return [
+        item for item in data
+        if isinstance(item, dict)
+        and item.get("link")
+        and item.get("cover_letter")
+        and item["link"] not in busy
+    ]
+
+
+def pending_active() -> list[dict]:
+    """Активные вакансии, по которым ещё нет письма и отклика."""
+    busy = busy_links()
+    data = read_json(ACTIVE_CANDIDATES_FILE, []) or []
+    if isinstance(data, dict):
+        data = data.get("items", [])
+    if not isinstance(data, list):
+        return []
+    return [
+        item for item in data
+        if isinstance(item, dict) and item.get("link") and item["link"] not in busy
+    ]
 
 
 def main():
+    init_db()
     status(0, "Подготовка")
     log("=" * 70)
     log("🚀 Полный цикл запущен")
     log("=" * 70)
 
+    # Умный пропуск: если данные уже есть, не сканируем заново.
+    skip: set[int] = set()
+    letters_ready = pending_letters()
+    active_ready = pending_active()
+    if letters_ready:
+        skip = {1, 2, 3, 4}
+        log(
+            f"⚡ В очереди {len(letters_ready)} готовых писем. "
+            "Сбор, анализ, отбор и генерация пропущены — сразу отправляем."
+        )
+    elif active_ready:
+        skip = {1, 2}
+        log(
+            f"⚡ Уже есть {len(active_ready)} активных вакансий. "
+            "Сбор и анализ пропущены — пишем письма и отправляем."
+        )
+
     for index, (label, script, args) in enumerate(STAGES, start=1):
-        if script == "hh_writer.py" and not has_items(ACTIVE_CANDIDATES_FILE):
+        if index in skip:
+            continue
+        if script == "hh_writer.py" and not pending_active():
             log("⏭️ Нет активных вакансий — письма и отклики пропускаются.")
             status(index, "Нет активных вакансий", state="skipped")
             continue
-        if script == "hh_executor.py" and not has_items(COVER_LETTERS_FILE):
+        if script == "hh_executor.py" and not pending_letters():
             log("⏭️ Нет писем в очереди — отправка пропускается.")
             status(index, "Нет писем в очереди", state="skipped")
             continue
